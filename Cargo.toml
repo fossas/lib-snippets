@@ -3,6 +3,9 @@ name = "snippets"
 version = "0.2.0"
 edition = "2021"
 description = "Extracts snippets of programming languages from files"
+
+# This is very FOSSA specific, so don't publish to crates.io.
+# Instead, just add this as a dependency using git path: `cargo add git@github.com:fossas/lib-snippets.git`.
 publish = false
 
 [features]
