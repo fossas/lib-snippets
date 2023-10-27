@@ -1,24 +1,4 @@
-//! Provides a framework and implementations for extracting snippets of programming languages from files.
-//!
-//! # Aspirations
-//!
-//! - Extensible over feature complete
-//! - Platform independent over platform optimized
-//! - Reliable over performant
-//!
-//! # Feature flags
-//!
-//! The main library, which enables consumers to plug their own implementations, is available by default.
-//! Features are most commonly used to enable support for languages,
-//! but other kinds of flags exist; see the table below for details.
-//!
-//! Name | Description | Kind
-//! ---|---|---
-//! `lang-all` | Enables all features that are of the kind "Language" | Language
-//! `lang-c99-tc3` | Enables support for C99 TC3 | Language
-//! `lang-cpp` | Enables support for C++ 98. | Language
-//! `sha2-asm` | Enables hardware acceleration for SHA2 | Performance
-
+#![doc = include_str!("../README.md")]
 #![deny(clippy::invalid_regex)]
 
 use std::{
@@ -399,7 +379,7 @@ pub enum Strategy {
 
 /// An extracted snippet from the given unit of source code.
 #[derive(Clone, Getters, CopyGetters, Index, Deref, Derivative, TypedBuilder)]
-#[derivative(PartialOrd, Ord, PartialEq, Eq)]
+#[derivative(Ord, PartialEq, Eq)]
 pub struct Snippet<L> {
     /// Metadata for the extracted snippet.
     #[getset(get_copy = "pub")]
@@ -423,6 +403,12 @@ pub struct Snippet<L> {
     /// but `PhantomData<T>` is always equal to itself for both checks.
     #[builder(default, setter(skip))]
     language: PhantomData<L>,
+}
+
+impl<L> PartialOrd for Snippet<L> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 impl<L> Snippet<L> {
