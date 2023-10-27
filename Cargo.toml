@@ -3,6 +3,7 @@ name = "snippets"
 version = "0.2.0"
 edition = "2021"
 description = "Extracts snippets of programming languages from files"
+publish = false
 
 [features]
 default = []
