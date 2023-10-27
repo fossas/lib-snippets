@@ -43,13 +43,8 @@ use tree_sitter::Node;
 use tree_sitter_traversal::{traverse, traverse_tree, Order};
 
 use crate::debugging::ToDisplayEscaped;
-use crate::text::normalize_space;
-use crate::tree_sitter_consts::{NODE_KIND_FUNC_DEF, NODE_KIND_OPEN_BRACE};
+use crate::parser::{normalize, NODE_KIND_FUNC_DEF, NODE_KIND_OPEN_BRACE};
 use crate::{impl_language, impl_prelude::*};
-
-use super::normalize_code::normalize_code;
-use super::normalize_comments::normalize_comments;
-use super::snippet_context::SnippetContext;
 
 /// This module implements support for CPP 98.
 ///
@@ -262,9 +257,9 @@ fn extract_text<'a>(method: SnippetMethod, context: &'a SnippetContext) -> Cow<'
 #[tracing::instrument(skip_all)]
 fn transform<'a>(transform: SnippetTransform, context: &'a SnippetContext) -> Cow<'a, [u8]> {
     match transform {
-        SnippetTransform::Code => normalize_code(context),
-        SnippetTransform::Comment => normalize_comments(context).into(),
-        SnippetTransform::Space => normalize_space(context.content()),
+        SnippetTransform::Code => normalize::code(context),
+        SnippetTransform::Comment => normalize::comments(context).into(),
+        SnippetTransform::Space => normalize::space(context.content()),
     }
 }
 

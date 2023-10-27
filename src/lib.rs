@@ -1,4 +1,24 @@
-#![doc = include_str!("../README.md")]
+//! Provides a framework and implementations for extracting snippets of programming languages from files.
+//!
+//! # Aspirations
+//!
+//! - Extensible over feature complete
+//! - Platform independent over platform optimized
+//! - Reliable over performant
+//!
+//! # Feature flags
+//!
+//! The main library, which enables consumers to plug their own implementations, is available by default.
+//! Features are most commonly used to enable support for languages,
+//! but other kinds of flags exist; see the table below for details.
+//!
+//! Name | Description | Kind
+//! ---|---|---
+//! `lang-all` | Enables all features that are of the kind "Language" | Language
+//! `lang-c99-tc3` | Enables support for C99 TC3 | Language
+//! `lang-cpp` | Enables support for C++ 98. | Language
+//! `sha2-asm` | Enables hardware acceleration for SHA2 | Performance
+
 #![deny(clippy::invalid_regex)]
 
 use std::{
@@ -18,12 +38,14 @@ use once_cell::sync::OnceCell;
 use strum::{Display, EnumIter};
 use tap::Conv;
 use thiserror::Error;
+use tree_sitter::Node;
+use tree_sitter_traversal::{traverse, Order};
 use typed_builder::TypedBuilder;
 
 pub mod debugging;
 pub mod language;
+pub mod parser;
 pub mod text;
-mod tree_sitter_consts;
 
 /// Convenience import for all types that
 /// an implementation of [`Extractor`] would likely need.
@@ -35,8 +57,8 @@ mod tree_sitter_consts;
 /// [`Error`]: crate::Error
 pub mod impl_prelude {
     pub use super::{
-        Error as ExtractorError, Extractor as SnippetExtractor, Kind as SnippetKind,
-        Kinds as SnippetKinds, Language as SnippetLanguage, LanguageError,
+        Context as SnippetContext, Error as ExtractorError, Extractor as SnippetExtractor,
+        Kind as SnippetKind, Kinds as SnippetKinds, Language as SnippetLanguage, LanguageError,
         Location as SnippetLocation, Metadata as SnippetMetadata, Method as SnippetMethod,
         Options as SnippetOptions, Snippet, Strategy as LanguageStrategy, Target as SnippetTarget,
         Transform as SnippetTransform, Transforms as SnippetTransforms,
@@ -384,7 +406,7 @@ pub enum Strategy {
 
 /// An extracted snippet from the given unit of source code.
 #[derive(Clone, Getters, CopyGetters, Index, Deref, Derivative, TypedBuilder)]
-#[derivative(Ord, PartialEq, Eq)]
+#[derivative(PartialOrd, Ord, PartialEq, Eq)]
 pub struct Snippet<L> {
     /// Metadata for the extracted snippet.
     #[getset(get_copy = "pub")]
@@ -408,12 +430,6 @@ pub struct Snippet<L> {
     /// but `PhantomData<T>` is always equal to itself for both checks.
     #[builder(default, setter(skip))]
     language: PhantomData<L>,
-}
-
-impl<L> PartialOrd for Snippet<L> {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
 }
 
 impl<L> Snippet<L> {
@@ -1215,6 +1231,69 @@ trait DefaultIfEmpty: Default {
         } else {
             self
         }
+    }
+}
+
+/// This structure represents a view into a larger piece of parsed text.
+/// For snippet scanning, we generally look at just parts of a larger piece of text for each snippet.
+#[derive(Debug, PartialEq, Getters, CopyGetters)]
+pub struct Context<'a> {
+    /// The location (in `content`) of this snippet.
+    #[getset(get_copy = "pub")]
+    location: Location,
+
+    /// Parsed nodes representing the snippet.
+    #[getset(get = "pub")]
+    nodes: Vec<Node<'a>>,
+
+    /// The full text in which this snippet resides.
+    content: &'a [u8],
+}
+
+impl<'a> Context<'a> {
+    /// Make a new instance from a parent node and its location within the original parsed text.
+    ///
+    /// Ensure that the content provided is the same as the content used to extract the parent node;
+    /// byte offsets must line up for operations on this type to make sense.
+    pub fn new(parent: Node<'a>, location: Location, content: &'a [u8]) -> Self {
+        Self::from_nodes(traverse(parent.walk(), Order::Pre), location, content)
+    }
+
+    /// Make a new instance from a set of nodes and their location within the original parsed text.
+    ///
+    /// Ensure that the content provided is the same as the content used to extract the nodes;
+    /// byte offsets must line up for operations on this type to make sense.
+    pub fn from_nodes(
+        nodes: impl IntoIterator<Item = Node<'a>>,
+        location: Location,
+        content: &'a [u8],
+    ) -> Self {
+        Context {
+            nodes: nodes.into_iter().collect(),
+            location,
+            content,
+        }
+    }
+
+    /// Extract the part of the content indicated by the location.
+    pub fn content(&self) -> &[u8] {
+        self.location.extract_from(self.content)
+    }
+
+    /// Get content from the snippet which is not in ranges covered by the provided nodes.
+    pub fn content_around(&self, nodes: impl Iterator<Item = &'a Node<'a>>) -> Vec<u8> {
+        let mut slices = Vec::new();
+        let mut start_byte = self.location.start_byte();
+
+        for node in nodes {
+            let node_start_byte = node.start_byte();
+            slices.push(&self.content[start_byte..node_start_byte]);
+            start_byte = node.end_byte();
+        }
+
+        // `Location::end_byte` is inclusive.
+        slices.push(&self.content[start_byte..=self.location.end_byte()]);
+        slices.concat()
     }
 }
 
