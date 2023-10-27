@@ -1,28 +1,25 @@
-# template-rust
+Provides a framework and implementations for extracting snippets of programming languages from files.
 
-Template repository for a Rust project.
+# Aspirations
 
-TODOs for a new project:
-- [ ] Change the license if MPL2 is not appropriate for the project. Make sure to do this before adding any code.
-- [ ] Set [CODEOWNERS] to the team that owns the repository.
-- [ ] Create an API user in [FOSSA] and store it as a secret named `FOSSA_API_KEY`.
-  - Consider naming it with the pattern `ci-{REPO_NAME}`. For example, `ci-template-rust`.
-- [ ] Update repository permissions as appropriate. Generally, the CODEOWNER team is set as admin.
-- [ ] Update branch protection rules as appropriate.
-- [ ] Update repository features and settings. Recommended defaults:
-  - [ ] Turn off all features (Wikis, Issues, Sponsorships, Discussions, Projects); FOSSA uses other systems for these.
-  - [ ] Only allow squash merging.
-  - [ ] Always suggest updating PR branches.
-  - [ ] Allow auto-merge.
-  - [ ] Automatically delete head branches.
+- Extensible over pedantic features
+- Platform independent over platform optimized
+- Reliable over performant
 
-Then just edit the included Rust project, or remove it and `cargo init` your project, and get going!
+# Feature flags
 
-[codeowners]: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
-[fossa]: https://app.fossa.com
+The main library, which enables consumers to plug their own implementations, is available by default.
+Features are most commonly used to enable support for languages,
+but other kinds of flags exist; see the table below for details.
 
-# recommendations
+Name           | Description                                          | Kind
+---------------|------------------------------------------------------|------------
+`lang-all`     | Enables all features that are of the kind "Language" | Language
+`lang-c99-tc3` | Enables support for C99 TC3                          | Language
+`lang-cpp`     | Enables support for C++ 98.                          | Language
+`sha2-asm`     | Enables hardware acceleration for SHA2               | Performance
 
-- Prefer [cross compilation](./docs/dev/reference/cross-compile.md) over running workflows in distinct runners when possible.
-- If publishing a Linux binary, consider providing two: one that [statically links libc](./docs/dev/reference/static-binary.md), and one that doesn't.
-- If publishing a macOS binary, consider providing two: one for [Intel and one for M-series CPUs](./docs/dev/reference/macos-arch.md).
+# History
+
+This repository initially existed in FOSSA's [foundation-libs](https://github.com/fossas/foundation-libs/tree/master/snippets) monorepo.
+History for this library earlier than v0.1.3 can be viewed there.
