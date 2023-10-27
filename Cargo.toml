@@ -1,6 +1,6 @@
 [package]
 name = "snippets"
-version = "0.1.3"
+version = "0.2.0"
 edition = "2021"
 description = "Extracts snippets of programming languages from files"
 

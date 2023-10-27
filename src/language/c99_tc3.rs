@@ -294,7 +294,9 @@ fn inspect_node(node: &Node<'_>, content: &[u8]) {
 #[tracing::instrument]
 fn init_parser() -> Result<tree_sitter::Parser, ExtractorError> {
     let mut parser = tree_sitter::Parser::new();
-    parser.set_language(tree_sitter_c::language())?;
+    parser
+        .set_language(tree_sitter_c::language())
+        .map_err(ExtractorError::configure)?;
     Ok(parser)
 }
 

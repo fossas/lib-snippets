@@ -21,10 +21,10 @@ pub fn code<'a>(context: &'a SnippetContext) -> Cow<'a, [u8]> {
 }
 
 /// Remove all comment node text from the given content.
-/// In general, this function should work in any language for which treesitter produces nodes whose `kind` equals [`NODE_KIND_COMMENT`].
 ///
-/// Because tree sitter parsers can define their own node types
-/// it's possible a comment node may have a kind not equal to [`NODE_KIND_COMMENT`].
+/// Because tree sitter parsers can define their own node types,
+/// it's possible a comment node may have a kind that isn't expected.
+///
 /// Extractors that use this function should test each language-specific comment syntax at least once.
 #[tracing::instrument(skip_all)]
 pub fn comments<'a>(context: &'a SnippetContext) -> Vec<u8> {

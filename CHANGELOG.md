@@ -1,6 +1,13 @@
-# Unreleased
+# v0.2.0
 
 Adds support for Java.
+
+Breaking:
+- Normalizations have been centralized to `snippets::parser::normalize`.
+- `snippets::text::buffer` has been merged into `snippets::text`.
+- Some vestigal traits (such as `snippets::text::ConvertCRLFToLF`) have been removed.
+- Implementation-specific constants such as `NODE_KIND_COMMENT` have been made private.
+- Removed `tree-sitter` types from the API.
 
 # v0.1.3
 

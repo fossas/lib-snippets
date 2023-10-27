@@ -36,7 +36,7 @@ use getset::{CopyGetters, Getters};
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
 use strum::{Display, EnumIter};
-use tap::Conv;
+use tap::{Conv, Pipe};
 use thiserror::Error;
 use tree_sitter::Node;
 use tree_sitter_traversal::{traverse, Order};
@@ -51,10 +51,10 @@ pub mod text;
 /// an implementation of [`Extractor`] would likely need.
 ///
 /// Some commonly-named types are renamed to reduce the likelihood of collisions
-/// when imported via this prelude: e.g. [`Error`] becomes [`ExtractorError`].
+/// when imported via this prelude: e.g. [`Error`] becomes `ExtractorError`.
 ///
 /// [`Extractor`]: crate::Extractor
-/// [`Error`]: crate::Error
+/// [`Error`]: enum@crate::Error
 pub mod impl_prelude {
     pub use super::{
         Context as SnippetContext, Error as ExtractorError, Extractor as SnippetExtractor,
@@ -76,9 +76,9 @@ pub enum Error {
     DecodeUTF8(#[from] Utf8Error),
 }
 
-impl From<tree_sitter::LanguageError> for Error {
-    fn from(err: tree_sitter::LanguageError) -> Self {
-        LanguageError(err).into()
+impl Error {
+    fn configure(err: tree_sitter::LanguageError) -> Self {
+        format!("{err}").pipe(LanguageError).into()
     }
 }
 
@@ -86,8 +86,8 @@ impl From<tree_sitter::LanguageError> for Error {
 // Note: Implementing it this way allows us to keep `tree_sitter` out of the public API.
 //       More details: https://docs.rs/thiserror/latest/thiserror/
 #[derive(Debug, Error)]
-#[error(transparent)]
-pub struct LanguageError(#[from] tree_sitter::LanguageError);
+#[error("language: {0}")]
+pub struct LanguageError(String);
 
 /// An implementation of [`Extractor`] enables snippets to be extracted
 /// from a given unit of source code (typically a file).
@@ -96,13 +96,6 @@ pub trait Extractor {
     type Language: Language;
 
     /// Reads the provided unit of source code for snippets, according to the provided options.
-    ///
-    /// # Reader
-    ///
-    /// The [`Read`] instance provided to `source` may be partially or fully consumed during this process.
-    ///
-    /// If the reader was previously read (partially or fully, by example via [`Extractor::support`]),
-    /// it almost definitely needs to be reset to the initial point before using this method.
     fn extract(
         opts: &Options,
         content: impl AsRef<[u8]>,
