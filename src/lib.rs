@@ -5,9 +5,11 @@ use std::{
     borrow::Cow,
     marker::PhantomData,
     ops::{Range, RangeInclusive},
+    path::Path,
     str::Utf8Error,
 };
 
+use content::Content;
 use derivative::Derivative;
 use derive_more::{Constructor, Deref, Index};
 pub use fallible_iterator::FallibleIterator;
@@ -22,6 +24,7 @@ use tree_sitter::Node;
 use tree_sitter_traversal::{traverse, Order};
 use typed_builder::TypedBuilder;
 
+pub mod content;
 pub mod debugging;
 pub mod language;
 pub mod parser;
@@ -54,6 +57,9 @@ pub enum Error {
 
     #[error("read input as utf8")]
     DecodeUTF8(#[from] Utf8Error),
+
+    #[error("read file content")]
+    ReadFile(#[source] std::io::Error),
 }
 
 impl Error {
@@ -76,10 +82,16 @@ pub trait Extractor {
     type Language: Language;
 
     /// Reads the provided unit of source code for snippets, according to the provided options.
-    fn extract(
+    fn extract(opts: &Options, content: &Content) -> Result<Vec<Snippet<Self::Language>>, Error>;
+
+    /// Reads the provided file for snippets, according to the provided options.
+    fn extract_file(
         opts: &Options,
-        content: impl AsRef<[u8]>,
-    ) -> Result<Vec<Snippet<Self::Language>>, Error>;
+        path: impl AsRef<Path>,
+    ) -> Result<Vec<Snippet<Self::Language>>, Error> {
+        let content = Content::from_file(path).map_err(Error::ReadFile)?;
+        Self::extract(opts, &content)
+    }
 }
 
 /// Options for extracting snippets.

@@ -35,7 +35,8 @@ use tracing::{debug, warn};
 use tree_sitter::Node;
 use tree_sitter_traversal::{traverse, traverse_tree, Order};
 
-use crate::debugging::ToDisplayEscaped;
+use crate::content::Content;
+use crate::debugging::{inspect_node, ToDisplayEscaped};
 use crate::parser::{normalize, NODE_KIND_FUNC_DEF, NODE_KIND_OPEN_BRACE};
 use crate::{impl_language, impl_prelude::*};
 
@@ -60,14 +61,14 @@ pub struct Extractor;
 impl SnippetExtractor for Extractor {
     type Language = Language;
 
-    #[tracing::instrument(skip_all, fields(kinds = %opts.kinds(), transforms = %opts.transforms(), content_len = content.as_ref().len()))]
+    #[tracing::instrument(skip_all, fields(kinds = %opts.kinds(), transforms = %opts.transforms(), content_len = content.as_bytes().len()))]
     fn extract(
         opts: &SnippetOptions,
-        content: impl AsRef<[u8]>,
+        content: &Content,
     ) -> Result<Vec<Snippet<Self::Language>>, ExtractorError> {
         let mut parser = init_parser()?;
 
-        let content = content.as_ref();
+        let content = content.as_bytes();
         let Some(tree) = parser.parse(content, None) else {
             warn!("provided content did not parse to a tree");
             return Vec::new().pipe(Ok);
@@ -267,32 +268,8 @@ fn matches_target(target: SnippetTarget, node: Node<'_>) -> bool {
     }
 }
 
-#[tracing::instrument(skip_all)]
-fn inspect_node(node: &Node<'_>, content: &[u8]) {
-    let location = node.byte_range().pipe(SnippetLocation::from);
-    if node.is_error() {
-        let start = node.start_position();
-        let end = node.end_position();
-        warn!(
-            %location,
-            content = %location.extract_from(content).display_escaped(),
-            kind = %"syntax_error",
-            line_start = start.row,
-            line_end = end.row,
-            col_start = start.column,
-            col_end = end.column,
-        );
-    } else {
-        debug!(
-            %location,
-            content = %location.extract_from(content).display_escaped(),
-            kind = %node.kind(),
-        );
-    }
-}
-
 #[tracing::instrument]
-fn init_parser() -> Result<tree_sitter::Parser, ExtractorError> {
+pub(crate) fn init_parser() -> Result<tree_sitter::Parser, ExtractorError> {
     let mut parser = tree_sitter::Parser::new();
     parser
         .set_language(tree_sitter_c::language())

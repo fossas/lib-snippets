@@ -10,3 +10,14 @@
 //! so long as the new syntax doesn't prevent parsing functions out of the source code.
 //!
 //! [`Extractor`]: crate::Extractor
+
+use crate::impl_prelude::*;
+
+#[tracing::instrument]
+pub(crate) fn parser() -> Result<tree_sitter::Parser, ExtractorError> {
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(tree_sitter_java::language())
+        .map_err(ExtractorError::configure)?;
+    Ok(parser)
+}

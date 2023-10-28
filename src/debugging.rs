@@ -1,5 +1,11 @@
 //! Provides debugging helpers to snippet extractors.
 
+use tap::Pipe;
+use tracing::trace;
+use tree_sitter::Node;
+
+use crate::impl_prelude::*;
+
 /// Conversion trait for types that can be represented with [`EscapedText`].
 pub trait ToDisplayEscaped {
     fn display_escaped(&self) -> EscapedText;
@@ -23,5 +29,29 @@ impl<'a> std::fmt::Display for EscapedText<'a> {
             write!(f, "{c}")?;
         }
         Ok(())
+    }
+}
+
+#[tracing::instrument(skip_all)]
+pub(crate) fn inspect_node(node: &Node<'_>, content: &[u8]) {
+    let location = node.byte_range().pipe(SnippetLocation::from);
+    if node.is_error() {
+        let start = node.start_position();
+        let end = node.end_position();
+        trace!(
+            %location,
+            content = %location.extract_from(content).display_escaped(),
+            kind = %"syntax_error",
+            line_start = start.row,
+            line_end = end.row,
+            col_start = start.column,
+            col_end = end.column,
+        );
+    } else {
+        trace!(
+            %location,
+            content = %location.extract_from(content).display_escaped(),
+            kind = %node.kind(),
+        );
     }
 }

@@ -19,6 +19,8 @@ mod tracing;
 #[macro_export]
 macro_rules! include_str_lf {
     ($path:expr) => {
-        include_str!($path).replace("\r\n", "\n")
+        include_str!($path)
+            .replace("\r\n", "\n")
+            .pipe(snippets::content::Content::from)
     };
 }
