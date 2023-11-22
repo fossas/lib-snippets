@@ -59,12 +59,14 @@ mod tests {
         //! Technically, `[normalize_code]` has applications beyond C.
         //! This is meant to be a very basic test and uses C.
         //! Language specific tests should also be done against this as they are implemented.
-        let text = r#"int main() {
-  printf("Hello, world!"); // comment
-  /* A longer comment */
-}"#
+        let text = indoc::indoc! {r#"
+            int main() {
+                printf("Hello, world!"); // comment
+                /* A longer comment */
+            }
+        "#}
         .as_bytes();
-        let expected_text = r#"int main() { printf("Hello, world!"); }"#;
+        let expected_text = r#"int main() { printf("Hello, world!"); } "#;
 
         let mut parser = tree_sitter::Parser::new();
         parser
@@ -82,7 +84,7 @@ mod tests {
         );
 
         let out_text = code(&context);
-        assert_eq!(
+        pretty_assertions::assert_eq!(
             std::str::from_utf8(out_text.as_ref()).expect("Could not parse out text"),
             expected_text
         );
@@ -94,15 +96,19 @@ mod tests {
         //! Technically, `[normalize_comments]` has applications beyond C.
         //! This is meant to be a very basic test and uses C.
         //! Language specific tests should also be done against this during full fingerprinting.
-        let text = r#"int main() {
-  printf("Hello, world!"); // comment
-  /* A longer comment */
-}"#
+        let text = indoc::indoc! {r#"
+            int main() {
+                printf("Hello, world!"); // comment
+                /* A longer comment */
+            }
+        "#}
         .as_bytes();
-        let expected_text = r#"int main() {
-  printf("Hello, world!"); 
-  
-}"#;
+        let expected_text = indoc::indoc! {r#"
+            int main() {
+                printf("Hello, world!"); 
+                
+            }
+        "#};
 
         let mut parser = tree_sitter::Parser::new();
         parser
@@ -120,7 +126,7 @@ mod tests {
         );
 
         let out_text = comments(&context);
-        assert_eq!(
+        pretty_assertions::assert_eq!(
             std::str::from_utf8(out_text.as_ref()).expect("Could not parse out text"),
             expected_text
         );

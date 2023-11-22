@@ -170,6 +170,7 @@ pub fn node_kind(kind: &str) -> impl Fn(Node<'_>) -> bool + '_ {
 /// so these tests don't have to be extremely broad.
 #[cfg(test)]
 mod tests {
+    use indoc::indoc;
     use pretty_assertions::assert_eq;
     use tap::Pipe;
     use tree_sitter_traversal::traverse_tree;
@@ -182,7 +183,14 @@ mod tests {
     fn delimited_java() {
         let _ = tracing_subscriber::fmt::try_init();
 
-        let content = include_bytes!("testdata/java_11/hello_world.java").pipe(Content::from);
+        let content = indoc! {r#"
+        class HelloWorld {
+            public static void main(String[] args) {
+                System.out.println("Hello, World!");
+            }
+        }
+        "#}
+        .pipe(Content::from);
 
         let mut parser = java_11::parser().expect("init parser");
         let tree = parser
@@ -193,7 +201,7 @@ mod tests {
             .inspect(|node| inspect_node(node, content.as_bytes()))
             .find(|node| node.kind() == NODE_KIND_METHOD_DECL)
             .expect("find method declaration");
-        assert_eq!(function.byte_range(), (24..115), "snippet location");
+        assert_eq!(function.byte_range(), (23..114), "snippet location");
 
         let function = Function::distinct_body(function, &content, node_kind("block"));
         let signature = function
