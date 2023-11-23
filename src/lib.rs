@@ -3,6 +3,7 @@
 
 use std::{
     borrow::Cow,
+    collections::HashSet,
     marker::PhantomData,
     ops::{Range, RangeInclusive},
     path::Path,
@@ -164,21 +165,19 @@ pub trait Extractor {
 /// let options = Options::new(Target::Function, Kinds::full(), Transforms::none());
 /// assert!(options.transforms().is_empty());
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, CopyGetters)]
-#[getset(get_copy = "pub")]
+#[derive(Debug, Clone, PartialEq, Eq, Getters, CopyGetters)]
 pub struct Options {
     /// The target units of source code to extract as snippets.
+    #[getset(get_copy = "pub")]
     targets: Targets,
 
     /// The kinds of snippet to extract.
+    #[getset(get_copy = "pub")]
     kinds: Kinds,
 
     /// The normalizations used to extract this snippet.
-    transforms: Transforms,
-
-    /// Include the `raw` method.
-    /// Recommended for general use; disabling is mainly intended for tests.
-    include_raw: bool,
+    #[getset(get = "pub")]
+    methods: Methods,
 }
 
 impl Options {
@@ -186,38 +185,26 @@ impl Options {
     pub fn new(
         targets: impl Into<Targets>,
         kinds: impl Into<Kinds>,
-        transforms: impl Into<Transforms>,
+        methods: impl Into<Methods>,
     ) -> Self {
         Self {
             targets: targets.conv::<Targets>().default_if_empty(),
             kinds: kinds.conv::<Kinds>().default_if_empty(),
-            transforms: transforms.into(),
-            include_raw: true,
+            methods: methods.into(),
         }
     }
 
-    /// Disable generating [`Method::Raw`] snippets.
-    pub fn disable_raw(self) -> Self {
-        Self {
-            include_raw: false,
-            ..self
-        }
+    /// Ensure that [`Method::Raw`] is disabled in the options.
+    /// Ideally, just don't pass this method in the options in the first place.
+    pub fn disable_raw(mut self) -> Self {
+        self.methods.0.remove(&Method::Raw);
+        self
     }
 
     /// Report the cartesian product of the configured [`Kind`]s of snippets to extract
     /// with configured [`Method`]s to apply.
     pub fn cartesian_product(&self) -> impl Iterator<Item = (Target, Kind, Method)> {
-        let include_raw = self.include_raw;
-        itertools::iproduct!(
-            self.targets.iter(),
-            self.kinds.iter(),
-            Method::iter(self.transforms).filter(move |method| {
-                match method {
-                    Method::Raw => include_raw,
-                    _ => true,
-                }
-            })
-        )
+        itertools::iproduct!(self.targets.iter(), self.kinds.iter(), self.methods.iter())
     }
 }
 
@@ -226,8 +213,7 @@ impl Default for Options {
         Self {
             targets: Targets::full(),
             kinds: Kinds::full(),
-            transforms: Transforms::full(),
-            include_raw: true,
+            methods: Methods::full(),
         }
     }
 }
@@ -803,6 +789,75 @@ impl std::fmt::Display for Kinds {
     }
 }
 
+/// Methods used to extract snippets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Methods(HashSet<Method>);
+
+impl Methods {
+    /// Convenience constructor for all methods.
+    pub fn full() -> Self {
+        Transforms::full().pipe(Self::raw_and)
+    }
+
+    /// Construct a set of methods which only contains the `Raw` method.
+    pub fn raw() -> Self {
+        HashSet::from_iter([Method::Raw]).pipe(Self)
+    }
+
+    /// Construct a set of methods including raw and the provided transforms.
+    pub fn raw_and(transforms: Transforms) -> Self {
+        Method::iter(transforms).collect::<HashSet<_>>().pipe(Self)
+    }
+
+    /// Construct an empty set of methods.
+    pub fn empty() -> Self {
+        HashSet::new().pipe(Self)
+    }
+
+    /// Add a method to the set.
+    pub fn insert(&mut self, method: Method) {
+        self.0.insert(method);
+    }
+
+    /// Iterate over methods in the set.
+    pub fn iter(&self) -> impl Iterator<Item = Method> + Clone {
+        self.0.iter().copied().collect_vec().into_iter()
+    }
+}
+
+impl From<Option<Transforms>> for Methods {
+    fn from(value: Option<Transforms>) -> Self {
+        match value {
+            Some(transforms) => Self::from(transforms),
+            None => Self::raw(),
+        }
+    }
+}
+
+impl From<Option<Transform>> for Methods {
+    fn from(value: Option<Transform>) -> Self {
+        Transforms::from(value).pipe(Self::from)
+    }
+}
+
+impl From<Transforms> for Methods {
+    fn from(value: Transforms) -> Self {
+        Self::raw_and(value)
+    }
+}
+
+impl std::fmt::Display for Methods {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let methods = self
+            .iter()
+            .sorted_unstable()
+            .map(|t| t.to_string())
+            .collect_vec()
+            .join(",");
+        write!(f, "{methods}")
+    }
+}
+
 /// The method used to extract this snippet.
 ///
 /// # Specificity order
@@ -820,7 +875,7 @@ impl std::fmt::Display for Kinds {
 /// # let arbitrary = Transform::Space;
 /// assert!(Method::Raw > Method::Normalized(arbitrary));
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub enum Method {
     /// Generated from the text with the specified normalizations applied.
