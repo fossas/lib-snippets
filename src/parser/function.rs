@@ -1,4 +1,4 @@
-//! Extracts function parts out of a set of nodes.
+//! Parses functions for more detailed information.
 
 use std::cmp;
 

@@ -2,7 +2,6 @@ use snippets::{
     language::cpp_98, Extractor, Kind, Kinds, Location, Metadata, Options, Snippet, Target,
     Targets, Transform, Transforms,
 };
-use tap::Pipe;
 
 use crate::include_str_lf;
 

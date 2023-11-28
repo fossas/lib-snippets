@@ -60,6 +60,7 @@ pub struct Extractor;
 // or if the functionality makes sense to be shared.
 impl SnippetExtractor for Extractor {
     type Language = Language;
+    type Options = SnippetOptions;
 
     #[tracing::instrument(skip_all, fields(kinds = %opts.kinds(), methods = %opts.methods(), content_len = content.as_bytes().len()))]
     fn extract(

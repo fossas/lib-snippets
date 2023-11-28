@@ -82,12 +82,18 @@ pub trait Extractor {
     /// The source language supported by the implementation.
     type Language: Language;
 
+    /// The options accepted by the extractor.
+    type Options;
+
     /// Reads the provided unit of source code for snippets, according to the provided options.
-    fn extract(opts: &Options, content: &Content) -> Result<Vec<Snippet<Self::Language>>, Error>;
+    fn extract(
+        opts: &Self::Options,
+        content: &Content,
+    ) -> Result<Vec<Snippet<Self::Language>>, Error>;
 
     /// Reads the provided file for snippets, according to the provided options.
     fn extract_file(
-        opts: &Options,
+        opts: &Self::Options,
         path: impl AsRef<Path>,
     ) -> Result<Vec<Snippet<Self::Language>>, Error> {
         let content = Content::from_file(path).map_err(Error::ReadFile)?;
@@ -95,8 +101,10 @@ pub trait Extractor {
     }
 }
 
-/// Options for extracting snippets.
+/// Default options for extracting snippets.
 /// Options are constructed via the `Options::builder` method.
+///
+/// Note that different extractors can provide unique option types.
 ///
 /// # Best effort
 ///

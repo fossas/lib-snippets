@@ -18,9 +18,8 @@ mod tracing;
 /// Include the contents of the file at the provided path, normalizing `\r\n` to `\n`.
 #[macro_export]
 macro_rules! include_str_lf {
-    ($path:expr) => {
-        include_str!($path)
-            .replace("\r\n", "\n")
-            .pipe(snippets::content::Content::from)
-    };
+    ($path:expr) => {{
+        let content = include_str!($path).replace("\r\n", "\n");
+        snippets::content::Content::from(content)
+    }};
 }
