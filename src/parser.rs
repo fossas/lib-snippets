@@ -6,5 +6,4 @@ pub(crate) const NODE_KIND_METHOD_DECL: &str = "method_declaration";
 pub(crate) const NODE_KIND_CONSTRUCTOR_DECL: &str = "constructor_declaration";
 pub(crate) const NODE_KIND_OPEN_BRACE: &str = "{";
 
-pub(crate) mod function;
 pub mod normalize;
