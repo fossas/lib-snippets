@@ -147,7 +147,7 @@ pub trait Extractor {
 ///
 /// assert_eq!(options.targets(), Targets::full());
 /// assert_eq!(options.kinds(), Kinds::full());
-/// assert_eq!(options.transforms(), Transforms::full());
+/// assert_eq!(options.methods(), &Methods::full());
 /// ```
 ///
 /// Restricting the kinds of snippet extracted:
@@ -163,15 +163,15 @@ pub trait Extractor {
 /// ```
 /// # use snippets::*;
 /// let options = Options::new(Target::Function, Kinds::full(), Transform::Comment);
-/// assert!(options.transforms().contains(Transform::Comment));
-/// assert!(!options.transforms().contains(Transform::Space));
+/// assert!(options.methods().contains_transform(Transform::Comment));
+/// assert!(!options.methods().contains_transform(Transform::Space));
 /// ```
 ///
 /// Only use [`Method::Raw`]:
 /// ```
 /// # use snippets::*;
-/// let options = Options::new(Target::Function, Kinds::full(), Transforms::none());
-/// assert!(options.transforms().is_empty());
+/// let options = Options::new(Target::Function, Kinds::full(), Methods::raw());
+/// assert!(options.methods().contains(Method::Raw));
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Getters, CopyGetters)]
 pub struct Options {
@@ -831,6 +831,24 @@ impl Methods {
     pub fn iter(&self) -> impl Iterator<Item = Method> + Clone {
         self.0.iter().copied().collect_vec().into_iter()
     }
+
+    /// Report whether a method is contained in the set.
+    pub fn contains(&self, test: Method) -> bool {
+        self.0.contains(&test)
+    }
+
+    /// Report whether a transform is contained in the set.
+    pub fn contains_transform(&self, test: Transform) -> bool {
+        for method in &self.0 {
+            let Method::Normalized(transform) = method else {
+                continue;
+            };
+            if *transform == test {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 impl From<Option<Transforms>> for Methods {
@@ -844,6 +862,12 @@ impl From<Option<Transforms>> for Methods {
 
 impl From<Option<Transform>> for Methods {
     fn from(value: Option<Transform>) -> Self {
+        Transforms::from(value).pipe(Self::from)
+    }
+}
+
+impl From<Transform> for Methods {
+    fn from(value: Transform) -> Self {
         Transforms::from(value).pipe(Self::from)
     }
 }
