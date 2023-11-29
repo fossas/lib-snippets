@@ -41,8 +41,8 @@ pub mod text;
 /// [`Error`]: enum@crate::Error
 pub mod impl_prelude {
     pub use super::{
-        Context as SnippetContext, Error as ExtractorError, Extractor as SnippetExtractor,
-        Kind as SnippetKind, Kinds as SnippetKinds, Language as SnippetLanguage, LanguageError,
+        Context as SnippetContext, Error, Extractor as SnippetExtractor, Kind as SnippetKind,
+        Kinds as SnippetKinds, Language as SnippetLanguage, LanguageError,
         Location as SnippetLocation, Metadata as SnippetMetadata, Method as SnippetMethod,
         Options as SnippetOptions, Snippet, Strategy as LanguageStrategy, Target as SnippetTarget,
         Transform as SnippetTransform, Transforms as SnippetTransforms,
@@ -79,23 +79,17 @@ pub struct LanguageError(String);
 /// An implementation of [`Extractor`] enables snippets to be extracted
 /// from a given unit of source code (typically a file).
 pub trait Extractor {
-    /// The source language supported by the implementation.
-    type Language: Language;
-
     /// The options accepted by the extractor.
     type Options;
 
+    /// The snippet type returned by the extractor.
+    type Snippet;
+
     /// Reads the provided unit of source code for snippets, according to the provided options.
-    fn extract(
-        opts: &Self::Options,
-        content: &Content,
-    ) -> Result<Vec<Snippet<Self::Language>>, Error>;
+    fn extract(opts: &Self::Options, content: &Content) -> Result<Vec<Self::Snippet>, Error>;
 
     /// Reads the provided file for snippets, according to the provided options.
-    fn extract_file(
-        opts: &Self::Options,
-        path: impl AsRef<Path>,
-    ) -> Result<Vec<Snippet<Self::Language>>, Error> {
+    fn extract_file(opts: &Self::Options, path: &Path) -> Result<Vec<Self::Snippet>, Error> {
         let content = Content::from_file(path).map_err(Error::ReadFile)?;
         Self::extract(opts, &content)
     }

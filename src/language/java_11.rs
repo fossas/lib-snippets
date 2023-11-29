@@ -50,14 +50,11 @@ pub struct Options;
 pub struct Extractor;
 
 impl SnippetExtractor for Extractor {
-    type Language = Language;
     type Options = Options;
+    type Snippet = Snippet<Language>;
 
     #[tracing::instrument(skip_all, fields(content_len = content.as_bytes().len()))]
-    fn extract(
-        _opts: &Self::Options,
-        content: &Content,
-    ) -> Result<Vec<Snippet<Self::Language>>, ExtractorError> {
+    fn extract(_opts: &Self::Options, content: &Content) -> Result<Vec<Self::Snippet>, Error> {
         let mut parser = parser()?;
 
         let content = content.as_bytes();
@@ -99,7 +96,7 @@ fn extract_function<L>(
     loc: SnippetLocation,
     node: Node<'_>,
     content: &[u8],
-) -> Result<Snippet<L>, ExtractorError> {
+) -> Result<Snippet<L>, Error> {
     // The raw content here is just extracted for debugging.
     let raw = loc.extract_from(content);
     debug!(raw = %raw.display_escaped());
@@ -128,10 +125,10 @@ fn extract_function<L>(
 }
 
 #[tracing::instrument]
-pub(crate) fn parser() -> Result<tree_sitter::Parser, ExtractorError> {
+pub(crate) fn parser() -> Result<tree_sitter::Parser, Error> {
     let mut parser = tree_sitter::Parser::new();
     parser
         .set_language(tree_sitter_java::language())
-        .map_err(ExtractorError::configure)?;
+        .map_err(Error::configure)?;
     Ok(parser)
 }
