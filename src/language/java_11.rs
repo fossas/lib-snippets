@@ -22,7 +22,7 @@ use crate::{
     debugging::{inspect_node, ToDisplayEscaped},
     impl_language,
     impl_prelude::*,
-    parser::{Symbol, NODE_KIND_CONSTRUCTOR_DECL, NODE_KIND_METHOD_DECL},
+    parser::{FunctionDeclaration, Symbol, NODE_KIND_CONSTRUCTOR_DECL, NODE_KIND_METHOD_DECL},
 };
 
 /// This module implements support for Java 11.
@@ -123,24 +123,66 @@ fn extract_function<L>(
         .pipe(Ok)
 }
 
-/// Snippets returned by the Java extractor also contain callgraph information.
-///
-/// Other languages may wish to adopt this kind of snippet in the future;
-/// at the moment this is unique to Java since the two pre-existing languages (C and C++)
-/// do not contain this information.
-///
-/// If this kind of snippet becomes more common, we should probably
-/// alter the standard snippet type, special casing C/C++ instead.
-///
-/// Note that this type also assumes the embedded [`Snippet`] is [`SnippetTarget::Function`].
-/// This
+/// Call graphs are made up of functions found in the source code, which call 0 or more other functions.
 #[derive(Clone, Eq, PartialEq, Getters)]
 pub struct CallGraphEntry {
-    /// The name of the function that denotes this node in a call graph.
-    name: Symbol,
+    /// The function that denotes this node in a call graph.
+    ///
+    /// For example, given the file:
+    /// ```not_rust
+    /// import java.util.logging.Logger;
+    ///
+    /// public class TestFunctions {
+    ///
+    ///   private static final Logger logger = Logger.getLogger(TestFunctions.class.getName());
+    ///
+    ///   public void simpleMethod() {
+    ///     logger.info("simpleMethod called");
+    ///     methodWithParam(5); // Calling another method
+    ///   }
+    /// }
+    /// ```
+    ///
+    /// When reporting the `simpleMethod` method, `target` consists of:
+    /// ```not_rust
+    /// Function {
+    ///   name: "default.TestFunctions::simpleMethod",
+    ///   ...
+    /// }
+    /// ```
+    target: FunctionDeclaration<()>,
 
     /// The functions this function calls.
-    calls: Vec<Symbol>,
+    /// These are denoted as symbols because they are unresolved.
+    ///
+    /// For example, given the file:
+    /// ```not_rust
+    /// import java.util.logging.Logger;
+    ///
+    /// public class TestFunctions {
+    ///
+    ///   private static final Logger logger = Logger.getLogger(TestFunctions.class.getName());
+    ///
+    ///   public void simpleMethod() {
+    ///     logger.info("simpleMethod called");
+    ///     methodWithParam(5); // Calling another method
+    ///   }
+    /// }
+    /// ```
+    ///
+    /// When reporting the `simpleMethod` method, `calls` consists of:
+    /// ```not_rust
+    /// Vec [
+    ///   Symbol { name: "java.util.logging.Logger::info", ... },
+    ///   Symbol { name: "default.TestFunctions::methodWithParam", ... },
+    /// ]
+    /// ```
+    ///
+    /// These are "unresolved symbols" even though they indicate the full path,
+    /// because this data structure doesn't itself provide
+    /// the recursive data of these functions:
+    /// namely what they call and where they are declared.
+    calls: Vec<Symbol<()>>,
 }
 
 /// Extracts function call graphs from source code.

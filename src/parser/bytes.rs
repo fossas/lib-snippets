@@ -8,12 +8,12 @@ use std::{
 use getset::CopyGetters;
 use typed_builder::TypedBuilder;
 
-/// The location in the unit of source code from which the snippet was extracted.
+/// The location in a unit of source code from which content was extracted.
 ///
 /// After opening the file (so a hypothetical reader is at byte offset `0`),
 /// the reader then skips a number of bytes equal to `byte_offset`,
 /// then reads a number of bytes equal to `byte_len`.
-/// The bytes that were read compose the entire snippet.
+/// The bytes that were read compose the entire content indicated by this [`Location`].
 ///
 /// For example, given the file:
 /// ```not_rust
@@ -35,12 +35,12 @@ use typed_builder::TypedBuilder;
 /// The [`Location`] below represents the `int main()` snippet in that example:
 /// ```
 /// # // ⏎ is a multi-byte symbol, so use an empty space for demonstration instead.
-/// # let example = "#include <stdio.h>  int main() {}";
-/// # use snippets::*;
+/// # let example = b"#include <stdio.h>  int main() {}";
+/// # use snippets::parser::bytes::*;
 /// let location = Location::builder().byte_offset(20).byte_len(10).build();
 ///
 /// let range = location.as_range();
-/// let snippet = &example.as_bytes()[range];
+/// let snippet = &example[range];
 ///
 /// let got = std::str::from_utf8(snippet)?;
 /// assert_eq!(got, "int main()");
