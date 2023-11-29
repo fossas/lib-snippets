@@ -1,5 +1,7 @@
 use pretty_assertions::assert_eq;
-use snippets::{language::java_11, Extractor, Kind, Location, Metadata, Method, Snippet};
+use snippets::{
+    language::java_11, parser::bytes::Location, Extractor, Kind, Metadata, Method, Snippet,
+};
 
 use crate::include_str_lf;
 
@@ -30,7 +32,7 @@ fn smoke_test() {
     let kind = Kind::Full;
     let transform = None;
 
-    let options = java_11::Options;
+    let options = java_11::EmptyOptions;
     let content = include_str_lf!("testdata/java_11/smoke_test.java");
     let extract = java_11::Extractor::extract(&options, &content).expect("set up parser");
 
@@ -92,7 +94,7 @@ fn full_raw_hello_world() {
     let transform = None;
     let span = Location::from(24..115);
 
-    let options = java_11::Options;
+    let options = java_11::EmptyOptions;
     let content = include_str_lf!("testdata/java_11/hello_world.java");
     let extract = java_11::Extractor::extract(&options, &content).expect("set up parser");
 

@@ -11,6 +11,7 @@
 //!
 //! [`Extractor`]: crate::Extractor
 
+use getset::Getters;
 use tap::{Pipe, Tap};
 use tracing::{debug, warn};
 use tree_sitter::Node;
@@ -21,7 +22,7 @@ use crate::{
     debugging::{inspect_node, ToDisplayEscaped},
     impl_language,
     impl_prelude::*,
-    parser::{NODE_KIND_CONSTRUCTOR_DECL, NODE_KIND_METHOD_DECL},
+    parser::{Symbol, NODE_KIND_CONSTRUCTOR_DECL, NODE_KIND_METHOD_DECL},
 };
 
 /// This module implements support for Java 11.
@@ -37,24 +38,22 @@ impl SnippetLanguage for Language {
 
 impl_language!(Language);
 
-/// This type is a Java-specific replacement for [`SnippetOptions`],
-/// since the Java extractor does not support the full set of options.
+/// An empty struct used when no options are accepted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmptyOptions;
+
+/// Extracts standard snippets from source code.
 ///
 /// All targets extracted are extracted with the equivalent of
-/// [`SnippetTarget::Function`], [`SnippetKind::Full`], and [`SnippetMethod::Raw`]
-/// inside [`SnippetOptions`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Options;
-
-/// Supports extracting snippets from source code.
+/// [`SnippetTarget::Function`], [`SnippetKind::Full`], and [`SnippetMethod::Raw`].
 pub struct Extractor;
 
 impl SnippetExtractor for Extractor {
-    type Options = Options;
-    type Snippet = Snippet<Language>;
+    type Options = EmptyOptions;
+    type Output = Vec<Snippet<Language>>;
 
     #[tracing::instrument(skip_all, fields(content_len = content.as_bytes().len()))]
-    fn extract(_opts: &Self::Options, content: &Content) -> Result<Vec<Self::Snippet>, Error> {
+    fn extract(_: &Self::Options, content: &Content) -> Result<Self::Output, Error> {
         let mut parser = parser()?;
 
         let content = content.as_bytes();
@@ -122,6 +121,47 @@ fn extract_function<L>(
     Snippet::from(meta, text)
         .tap(|snippet| debug!(fingerprint = %snippet.fingerprint()))
         .pipe(Ok)
+}
+
+/// Snippets returned by the Java extractor also contain callgraph information.
+///
+/// Other languages may wish to adopt this kind of snippet in the future;
+/// at the moment this is unique to Java since the two pre-existing languages (C and C++)
+/// do not contain this information.
+///
+/// If this kind of snippet becomes more common, we should probably
+/// alter the standard snippet type, special casing C/C++ instead.
+///
+/// Note that this type also assumes the embedded [`Snippet`] is [`SnippetTarget::Function`].
+/// This
+#[derive(Clone, Eq, PartialEq, Getters)]
+pub struct CallGraphEntry {
+    /// The name of the function that denotes this node in a call graph.
+    name: Symbol,
+
+    /// The functions this function calls.
+    calls: Vec<Symbol>,
+}
+
+/// Extracts function call graphs from source code.
+pub struct CallGraphExtractor;
+
+impl SnippetExtractor for CallGraphExtractor {
+    type Options = EmptyOptions;
+    type Output = Vec<CallGraphEntry>;
+
+    #[tracing::instrument(skip_all, fields(content_len = content.as_bytes().len()))]
+    fn extract(_: &Self::Options, content: &Content) -> Result<Self::Output, Error> {
+        let mut parser = parser()?;
+
+        let content = content.as_bytes();
+        let Some(tree) = parser.parse(content, None) else {
+            warn!("provided content did not parse to a tree");
+            return Vec::new().pipe(Ok);
+        };
+
+        todo!()
+    }
 }
 
 #[tracing::instrument]

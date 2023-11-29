@@ -60,7 +60,7 @@ pub struct Extractor;
 // or if the functionality makes sense to be shared.
 impl SnippetExtractor for Extractor {
     type Options = SnippetOptions;
-    type Snippet = Snippet<Language>;
+    type Output = Vec<Snippet<Language>>;
 
     #[tracing::instrument(
         skip_all,
@@ -70,7 +70,7 @@ impl SnippetExtractor for Extractor {
             content_len = content.as_bytes().len(),
         )
     )]
-    fn extract(opts: &Self::Options, content: &Content) -> Result<Vec<Self::Snippet>, Error> {
+    fn extract(opts: &Self::Options, content: &Content) -> Result<Self::Output, Error> {
         let mut parser = init_parser()?;
 
         let content = content.as_bytes();
