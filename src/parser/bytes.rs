@@ -5,7 +5,10 @@ use std::{
     ops::{Range, RangeInclusive},
 };
 
+use derive_more::{Add, AddAssign, Display, Sub, SubAssign};
 use getset::CopyGetters;
+use miette::SourceSpan;
+use tree_sitter::Node;
 use typed_builder::TypedBuilder;
 
 /// The location in a unit of source code from which content was extracted.
@@ -52,7 +55,9 @@ use typed_builder::TypedBuilder;
 // which argument is which.
 //
 // Basically, the intent is to straddle the line between newtype convenience and newtype safety.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, CopyGetters, TypedBuilder)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord, CopyGetters, TypedBuilder,
+)]
 #[getset(get_copy = "pub")]
 pub struct Location {
     /// The byte offset at which the snippet began.
@@ -92,6 +97,11 @@ impl Location {
         } else {
             end - 1 // as_range is not inclusive, so the last byte _to be read_ is less one.
         }
+    }
+
+    /// Whether the location is empty.
+    pub fn is_empty(&self) -> bool {
+        self.byte_len.0 == 0
     }
 
     /// Extract the bytes indicated by a [`Location`] from a buffer.
@@ -151,6 +161,43 @@ impl From<RangeInclusive<usize>> for Location {
     }
 }
 
+impl From<Node<'_>> for Location {
+    fn from(value: Node<'_>) -> Self {
+        value.byte_range().into()
+    }
+}
+
+impl From<Location> for SourceSpan {
+    fn from(value: Location) -> Self {
+        Self::new(
+            value.byte_offset().as_usize().into(),
+            value.byte_len().as_usize().into(),
+        )
+    }
+}
+
+impl std::ops::Add for Location {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        let start = self.start_byte().min(rhs.start_byte());
+        let end = self.end_byte().max(rhs.end_byte());
+        (start..=end).into()
+    }
+}
+
+impl std::ops::AddAssign for Location {
+    fn add_assign(&mut self, rhs: Self) {
+        *self = *self + rhs;
+    }
+}
+
+impl std::iter::Sum for Location {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        iter.fold(Self::default(), |a, b| a + b)
+    }
+}
+
 /// The byte offset at which the snippet began.
 ///
 /// Zero-based, meaning that if the snippet begins on the first byte of the file,
@@ -158,7 +205,22 @@ impl From<RangeInclusive<usize>> for Location {
 ///
 /// Think of the offset as
 /// "the number of bytes to skip from the start of the file to when this snippet begins".
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, derive_more::Display)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    Display,
+    Add,
+    AddAssign,
+    Sub,
+    SubAssign,
+)]
 pub struct ByteOffset(usize);
 
 impl ByteOffset {
@@ -169,12 +231,65 @@ impl ByteOffset {
 }
 
 /// The number of bytes to read for the snippet from the file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, derive_more::Display)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    Display,
+    Add,
+    AddAssign,
+    Sub,
+    SubAssign,
+)]
 pub struct ByteLen(usize);
 
 impl ByteLen {
     /// View the length as a usize.
     pub fn as_usize(self) -> usize {
         self.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pretty_assertions::assert_eq;
+
+    use super::*;
+
+    #[test]
+    fn location_add() {
+        let a = Location::builder().byte_offset(10).byte_len(10).build();
+        let b = Location::builder().byte_offset(20).byte_len(20).build();
+        let expected = Location::builder().byte_offset(10).byte_len(30).build();
+        assert_eq!(expected, a + b);
+
+        let example = b"some text [ highlighted text ] other text";
+        //              ^         ^           ^ ^    ^
+        //     indexes: 0        10          22 24  29
+
+        let a = Location::builder().byte_offset(10).byte_len(13).build();
+        let b = Location::builder().byte_offset(24).byte_len(6).build();
+
+        // Note that the space between them is captured.
+        assert_eq!(a.extract_from_lossy(example), "[ highlighted");
+        assert_eq!(b.extract_from_lossy(example), "text ]");
+        assert_eq!((a + b).extract_from_lossy(example), "[ highlighted text ]");
+    }
+
+    #[test]
+    fn location_add_assign() {
+        let a = Location::builder().byte_offset(10).byte_len(10).build();
+        let b = Location::builder().byte_offset(20).byte_len(20).build();
+
+        let mut c = a;
+        c += b;
+
+        assert_eq!(a + b, c);
     }
 }

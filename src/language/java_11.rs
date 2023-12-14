@@ -11,7 +11,8 @@
 //!
 //! [`Extractor`]: crate::Extractor
 
-use getset::Getters;
+use derive_more::Constructor;
+use getset::{CopyGetters, Getters};
 use tap::{Pipe, Tap};
 use tracing::{debug, warn};
 use tree_sitter::Node;
@@ -19,10 +20,15 @@ use tree_sitter_traversal::{traverse_tree, Order};
 
 use crate::{
     content::Content,
-    debugging::{inspect_node, ToDisplayEscaped},
+    debugging::{inspect_node, NodeInspector, ToDisplayEscaped},
     impl_language,
     impl_prelude::*,
-    parser::{FunctionDeclaration, Symbol, NODE_KIND_CONSTRUCTOR_DECL, NODE_KIND_METHOD_DECL},
+    parser::{
+        bytes::Location,
+        java::{scope, symbol, Kind, Scope},
+        stack::Stack,
+        NODE_KIND_CONSTRUCTOR_DECL, NODE_KIND_METHOD_DECL,
+    },
 };
 
 /// This module implements support for Java 11.
@@ -124,7 +130,7 @@ fn extract_function<L>(
 }
 
 /// Call graphs are made up of functions found in the source code, which call 0 or more other functions.
-#[derive(Clone, Eq, PartialEq, Getters)]
+#[derive(Debug, Clone, Eq, PartialEq, Getters)]
 pub struct CallGraphEntry {
     /// The function that denotes this node in a call graph.
     ///
@@ -150,7 +156,7 @@ pub struct CallGraphEntry {
     ///   ...
     /// }
     /// ```
-    target: FunctionDeclaration<()>,
+    target: MethodDeclaration,
 
     /// The functions this function calls.
     /// These are denoted as symbols because they are unresolved.
@@ -182,7 +188,7 @@ pub struct CallGraphEntry {
     /// because this data structure doesn't itself provide
     /// the recursive data of these functions:
     /// namely what they call and where they are declared.
-    calls: Vec<Symbol<()>>,
+    calls: Vec<Kind>,
 }
 
 /// Extracts function call graphs from source code.
@@ -202,7 +208,404 @@ impl SnippetExtractor for CallGraphExtractor {
             return Vec::new().pipe(Ok);
         };
 
-        todo!()
+        // As the content is parsed, it can't be collapsed
+        // into something simple like a lookup table;
+        // this is because Java is a scoped language so the same
+        // name may indicate multiple symbol paths at different scopes.
+        //
+        // Instead, this parser builds a stack of symbols,
+        // performing a naive search of the entire stack (from front to back)
+        // to resolve names into their fully qualified symbols.
+        //
+        // Symbols that are not found in the stack are assumed syntactically correct,
+        // and that they are declared in a different file in the same package.
+        //
+        // Note that this is not a generalized parser for Java;
+        // it is specific to _methods_ and therefore only stores
+        // symbols that are required for resolving methods to their
+        // declarations. As a concrete example, this parser ignores enums,
+        // because they are not relevant for looking up methods.
+        let mut stack = Stack::<Kind>::default();
+
+        // Build the stack. Reporting the call graph is a two-phase operation
+        // becuase each given symbol may depend on things that come
+        // later in the file.
+        for node in traverse_tree(&tree, Order::Pre).inspect_nodes(content) {
+            if let Some(scope) = scope(node) {
+                match scope {
+                    Scope::Enter(location) => stack.enter(location),
+                    Scope::Exit(location) => stack.exit(location),
+                }
+                continue;
+            }
+
+            if let Some(symbol) = symbol(node, content) {
+                stack.push(symbol);
+                continue;
+            }
+        }
+
+        // Once a method declaration has been resolved using the stack,
+        // it's copied here for export. This way the stack can be freely
+        // modified without changing the exported results,
+        // which may depend on elements in the stack.
+        let mut entries = Vec::new();
+
+        Ok(entries)
+    }
+}
+
+/// A method declaration in source code.
+///
+/// Together, `MethodDeclaration` and `MethodInvocation`
+/// form the backbone of the call graph that this package exports.
+#[derive(Clone, Eq, PartialEq, Debug, Getters, CopyGetters, Constructor)]
+pub struct MethodDeclaration {
+    /// The full path to the method declaration.
+    ///
+    /// Does not include the method declaration itself.
+    /// For example with the following code:
+    /// ```not_rust
+    /// public class TestFunctions {
+    ///     public void simpleMethod() {
+    ///         // ...
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// The path to `simpleMethod` is:
+    /// ```not_rust
+    /// Path([
+    ///   Symbol::Package{ label: "default" },
+    ///   Symbol::Class{ label: "TestFunctions" },
+    /// ])
+    /// ```
+    ///
+    /// To build a full path including this declaration,
+    /// append the appropriate [`Symbol`] type
+    /// to the path.
+    ///
+    /// Note: the "default" package is implicit in Java programs
+    /// if no other package is declared.
+    path: Vec<Kind>,
+
+    /// The signature of the method being declared.
+    ///
+    /// `signature` + `path` is enough to uniquely identify a method on a class
+    /// without knowing if the signature refers to a static or instance method
+    /// because Java does not allow classes to have both kinds with the same signature.
+    signature: Signature,
+
+    /// The location of this declaration in the source code.
+    location: Location,
+
+    /// The methods invoked by this method.
+    ///
+    /// For example, in the following code:
+    /// ```not_rust
+    /// import java.util.logging.Logger;
+    ///
+    /// public class TestFunctions {
+    ///
+    ///     // Logger for logging messages
+    ///     private static final Logger logger =
+    ///         Logger.getLogger(TestFunctions.class.getName());
+    ///
+    ///     // Default constructor
+    ///     public TestFunctions() {
+    ///         logger.info("Constructor called");
+    ///     }
+    ///
+    ///     public void simpleMethod() {
+    ///         methodWithParam(5);
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// The value of `invokes` for `simpleMethod` is:
+    /// ```not_rust
+    /// Vec[
+    ///   MethodInvocation{
+    ///     path: NonEmpty[
+    ///       Symbol::Package{ label: "default" },
+    ///       Symbol::Class{ label: "TestFunctions" },
+    ///     ],
+    ///     target: NonEmpty[
+    ///       Symbol::Package{ label: "default" },
+    ///       Symbol::Class{ label: "TestFunctions" },
+    ///     ],
+    ///     signature: "methodWithParam(int)",
+    ///   }
+    /// ]
+    /// ```
+    ///
+    /// Note that `Logger.getLogger` is called _when the class is first initialized_,
+    /// not when an instance is constructed (note the `static` keyword).
+    /// Initializing the class can happen when:
+    /// 1. An instance of the class is created.
+    /// 2. A static method of the class is invoked.
+    /// 3. A static field of the class is assigned or accessed.
+    /// 4. The class is referenced via reflection
+    ///    (note that reflection is not supported by this parser).
+    ///
+    /// To avoid such methods from getting lost in the reported graph,
+    /// we'll report methods called during static initialization
+    /// as part of the `invokes` list of anything that _could_ result in
+    /// the initializer being called.
+    ///
+    /// For example, the value of `invokes` for the constructor is:
+    /// ```not_rust
+    /// Vec[
+    ///   MethodInvocation{
+    ///     path: NonEmpty[
+    ///       Symbol::Package{ label: "default" },
+    ///       Symbol::Class{ label: "TestFunctions" },
+    ///     ],
+    ///     target: NonEmpty[
+    ///       Symbol::Package{ label: "java" },
+    ///       Symbol::Package{ label: "util" },
+    ///       Symbol::Package{ label: "logging" },
+    ///       Symbol::Class{ label: "Logger" },
+    ///     ],
+    ///     signature: "getLogger(String)",
+    ///   },
+    ///   MethodInvocation{
+    ///     path: NonEmpty[
+    ///       Symbol::Package{ label: "default" },
+    ///       Symbol::Class{ label: "TestFunctions" },
+    ///       Symbol::Constructor{ signature: "TestFunctions()" },
+    ///     ],
+    ///     target: NonEmpty[
+    ///       Symbol::Package{ label: "java" },
+    ///       Symbol::Package{ label: "util" },
+    ///       Symbol::Package{ label: "logging" },
+    ///       Symbol::Class{ label: "Logger" },
+    ///     ],
+    ///     signature: "info(String)",
+    ///   },
+    /// ]
+    /// ```
+    ///
+    /// This is because the constructor:
+    /// - _May_ cause the static initializer to run,
+    ///   implicitly calling `Logger::getLogger`.
+    /// - Explicitly runs `Logger::info`.
+    ///
+    /// The reasoning here is that if a class is loaded, it's being used;
+    /// if used, any entrypoint call path can result in initialization;
+    /// therefore all entrypoints should record that they invoke
+    /// static initializers for the purposes of our call graph.
+    ///
+    /// While we're here, it's worth noting that the
+    /// intention of this package, and therefore this property,
+    /// is to report all _build-time defined_ edges between methods,
+    /// regardless of _runtime_ behavior.
+    /// This means that if for example a method is only called on
+    /// a specific platform, or in a specific runtime scenario,
+    /// it's always reported in the graph.
+    ///
+    /// Given this, the decision to report static initializers
+    /// is consistent with the overall theme of the library.
+    invokes: Vec<MethodInvocation>,
+}
+
+/// A method invocation in source code.
+///
+/// Together, `MethodDeclaration` and `MethodInvocation`
+/// form the backbone of the call graph that this package exports.
+#[derive(Clone, Eq, PartialEq, Debug, Getters, CopyGetters, Constructor)]
+pub struct MethodInvocation {
+    /// The full path to the method invocation.
+    ///
+    /// Does not include the method invocation itself.
+    /// For example with the following code:
+    /// ```not_rust
+    /// public class TestFunctions {
+    ///     public void simpleMethod() {
+    ///         methodWithParam(5);
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// The path to the `methodWithParams` call inside `simpleMethod` is:
+    /// ```not_rust
+    /// Path([
+    ///   Symbol::Package{ label: "default" },
+    ///   Symbol::Class{ label: "TestFunctions" },
+    ///   Symbol::MethodDeclaration{ signature: "simpleMethod()" },
+    /// ])
+    /// ```
+    ///
+    /// The "default" package is implicit in Java programs
+    /// if no other package is declared.
+    ///
+    /// To build a full path including this declaration,
+    /// append the appropriate [`Symbol`] type
+    /// to the path.
+    path: Vec<Kind>,
+
+    /// The target symbol on which the method is being called.
+    ///
+    /// All method invocations _should_ have an identifiable target
+    /// at parse time, even when performing file-by-file parsing,
+    /// with a couple exceptions.
+    ///
+    /// For example, in the following code:
+    /// ```not_rust
+    /// import java.util.logging.Logger;
+    ///
+    /// public class TestFunctions {
+    ///
+    ///     private static final Logger logger =
+    ///         Logger.getLogger(TestFunctions.class.getName());
+    ///
+    ///     public TestFunctions() {
+    ///         logger.info("Constructor called");
+    ///     }
+    ///
+    ///     public void simpleMethod() {
+    ///         methodWithParam(5);
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// We can statically determine that:
+    /// - `default.TestFunctions::constructor()` calls `java.util.logging.Logger::info(String)`.
+    /// - `default.TestFunctions::simpleMethod()` calls `default.TestFunctions::methodWithParam(int)`.
+    ///
+    /// This is because:
+    /// - Users cannot define methods on a class in a separate file
+    ///   (they must subclass or compose to do this).
+    /// - All method invocations must be performed on a known type.
+    ///
+    /// The primary exception to this is classes referenced in another file that is part
+    /// of the same package. To work around this, all classes for which the source package
+    /// is not determined are attached to the current package for the file;
+    /// this way when multiple files that make up a package are parsed,
+    /// the resultant symbols can be resolved across files within the same package.
+    ///
+    /// The other exception to this is wildcard imports, which are not currently supported
+    /// by this library. These allow the use of classes implicitly imported from a package,
+    /// making it difficult or impossible to statically determine the package of a given class.
+    /// For example, in the following code:
+    /// ```not_rust
+    /// import java.util.logging.*;
+    ///
+    /// public class TestFunctions {
+    ///
+    ///     private static final Logger logger =
+    ///         Logger.getLogger(TestFunctions.class.getName());
+    ///
+    ///     public TestFunctions() {
+    ///         logger.info("Constructor called");
+    ///     }
+    ///
+    ///     public void simpleMethod() {
+    ///         methodWithParam(5);
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// Currently, this library assumes that `Logger`
+    /// (which is not resolvable due to the wildcard import)
+    /// belongs to the package declared in the file (in this case, implicitly `default`),
+    /// due to the behavior required to model multi-file packages.
+    /// As a result, the response from parsing this file looks like:
+    /// - `default.TestFunctions::constructor()` calls `default.Logger::info(String)`.
+    /// - `default.TestFunctions::simpleMethod()` calls `default.TestFunctions::methodWithParam(int)`.
+    ///
+    /// While we could assume in this particular case that `Logger`
+    /// belongs to the only wildcard import present in the package,
+    /// most Java programs that use any wildcard imports are unlikely to stop at one.
+    /// Additionally, reporting an association only some of the time is more confusing
+    /// to users than just not supporting this association at all.
+    target: Vec<Kind>,
+
+    /// The signature of the method being called.
+    ///
+    /// `signature` + `target` is enough to uniquely identify a method on a class
+    /// without knowing if the signature refers to a static or instance method,
+    /// because Java does not allow a class to declare both kinds with the same signature.
+    signature: Signature,
+
+    /// The location of this invocation in the source code.
+    location: Location,
+}
+
+/// The signature of a method.
+///
+/// # Overloads
+///
+/// Java allows overloading methods on:
+/// - Number of arguments
+/// - Type of arguments
+///
+/// This means that the following methods are distinct:
+/// ```not_rust
+/// public void example();
+/// public void example(int a);
+/// public void example(int a, String b);
+/// public void example(String a, int b);
+/// ```
+///
+/// Varargs complicate this as well.
+/// The following methods are considered ambiguous:
+/// ```not_rust
+/// public void example(int ... a);
+/// public void example(int a, int b);
+/// ```
+///
+/// Happily, neither return type nor argument names
+/// are considered overloads, meaning that methods which
+/// attempt to overload on these are considered ambiguous.
+///
+/// Based on these rules, this type consists of the
+/// minimal signature required to disambiguate overloads.
+///
+/// The above methods are recorded as:
+/// ```not_rust
+/// Signature ( "example()" )
+/// Signature ( "example(int...)" )
+/// Signature ( "example(int)" )
+/// Signature ( "example(int, String)" )
+/// Signature ( "example(String, int)" )
+/// ```
+///
+/// # Wildcards
+///
+/// Sometimes the types cannot be inferred statically.
+/// For example, consider this invocation:
+/// ```not_rust
+/// import java.util.logging.Logger;
+/// private static final Logger logger =
+///   Logger.getLogger(TestFunctions.class.getName());
+/// ```
+///
+/// Since we're not modeling Java execution, we don't
+/// know that `getName()` returns a `String` since we don't
+/// see its definition (it's implicit to Java and doesn't appear
+/// in the source code).
+///
+/// Such signatures are represented with an underscore per argument:
+/// ```not_rust
+/// Signature ( "java.util.logging.Logger::getLogger(_)" )
+/// ```
+///
+/// Specifically, in signatures `_` functions as a wildcard that matches
+/// one argument of any type.
+#[derive(Clone, Eq, PartialEq, Debug, Hash)]
+pub struct Signature(String);
+
+impl Signature {
+    /// Create a new instance with the provided value.
+    pub fn new(signature: impl Into<String>) -> Self {
+        signature.into().pipe(Self)
+    }
+}
+
+impl<S: Into<String>> From<S> for Signature {
+    fn from(value: S) -> Self {
+        value.into().pipe(Self)
     }
 }
 

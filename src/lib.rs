@@ -21,6 +21,7 @@ use typed_builder::TypedBuilder;
 
 pub mod content;
 pub mod debugging;
+pub(crate) mod ext;
 pub mod language;
 pub mod parser;
 pub mod text;

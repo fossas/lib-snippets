@@ -5,25 +5,17 @@ use snippets::{
 
 use crate::include_str_lf;
 
-// #[test]
-// fn smoke_test() {
-//     crate::tracing::setup();
+#[test]
+fn smoke_call_graph() {
+    crate::tracing::setup();
 
-//     let kind = Kind::Full;
-//     let transform = None;
-//     let span = Location::from(24..115);
+    let options = java_11::EmptyOptions;
+    let content = include_str_lf!("testdata/java_11/smoke_test.java");
+    let extract = java_11::CallGraphExtractor::extract(&options, &content).expect("set up parser");
 
-//     let options = java_11::Options;
-//     let content = include_str_lf!("testdata/java_11/smoke_test.java");
-//     let extract = java_11::Extractor::extract(&options, &content).expect("set up parser");
-
-//     let expected = vec![Snippet::from(
-//         Metadata::new(kind, Method::from(transform), span),
-//         span.extract_from(content.as_bytes()),
-//     )];
-
-//     assert_eq!(extract, expected);
-// }
+    let expected: Vec<java_11::CallGraphEntry> = vec![];
+    assert_eq!(expected, extract);
+}
 
 #[test]
 fn smoke_test() {
@@ -83,7 +75,7 @@ fn smoke_test() {
         ),
     ];
 
-    assert_eq!(extract, expected);
+    assert_eq!(expected, extract);
 }
 
 #[test]
@@ -103,5 +95,5 @@ fn full_raw_hello_world() {
         span.extract_from(content.as_bytes()),
     )];
 
-    assert_eq!(extract, expected);
+    assert_eq!(expected, extract);
 }
