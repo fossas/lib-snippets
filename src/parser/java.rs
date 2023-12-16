@@ -28,14 +28,19 @@ use once_cell::sync::Lazy;
 use tap::{Pipe, Tap};
 use tracing::trace;
 use tree_sitter::Node;
-use tree_sitter_traversal::{traverse, Order};
 
-use crate::{debugging::NodeInspector, parser::NODE_KIND_SEMI};
+use crate::{
+    debugging::NodeInspector,
+    parser::{
+        iter::{many_while, some},
+        NODE_KIND_SEMI,
+    },
+};
 
 use super::{bytes::Location, stack::Symbol, NODE_KIND_CLOSE_BRACE, NODE_KIND_OPEN_BRACE};
 
 /// A parser is any function that implements this type.
-type Parser = fn(Node<'_>, &[u8]) -> Option<Symbol<Kind>>;
+type Parser<T> = fn(Node<'_>, &[u8]) -> Option<T>;
 
 /// Wrap a [`Parser`] with the provided `content` so that it fits the shape
 /// expected by [`crate::parser::iter`] (which expects a function that
@@ -49,12 +54,12 @@ macro_rules! parser {
     };
 }
 
-/// Use [`crate::parser::iter::parse_some`] on the context,
+/// Use [`crate::parser::iter::some`] on the context,
 /// early returning [`None`] from the enclosing function if no parse
 /// is successful.
 macro_rules! parse_some {
     ($context:ident => $($tail:tt)*) => {
-        match crate::parser::iter::parse_some(&mut $context, parser!($($tail)*)) {
+        match crate::parser::iter::some(&mut $context, parser!($($tail)*)) {
             Some(result) => result,
             None => return None,
         }
@@ -71,51 +76,82 @@ macro_rules! symbol {
 /// Ensure the node is of the specified kind,
 /// else early return from the enclosing function.
 macro_rules! ensure_node_kind {
-    ($node:expr, $content:expr, $kind:expr) => {{
+    ($node:expr, $kind:expr) => {{
         if $node.kind() != $kind {
+            return None;
+        }
+    }};
+    ($node:expr, $kind_a:expr, $kind_b:expr) => {{
+        if $node.kind() != $kind_a && $node.kind() != $kind_b {
             return None;
         }
     }};
 }
 
+/// A lazily initialized stack of parsers.
+type ParserStack<T> = Lazy<Vec<Parser<T>>>;
+
+/// Instantiate a [`ParserStack`] with the provided parsers.
+///
+/// Usage:
+/// ```ignore
+/// parser_stack!(T, parsers...)
+/// ```
+///
+/// Creates a static variable in the current scope with the name `PARSER_STACK`
+/// containing a stack of parsers that result in type `T`.
+///
+/// Using this and [`some`], one can form an analogue to an "alternative" parser combinator:
+/// ```ignore
+/// pub fn scope(node: Node<'_>, content: &[u8]) -> Option<Scope> {
+///     parser_stack!(Scope => scope_enter, scope_exit);
+///     some(&mut PARSER_STACK.iter(), |parser| parser(node, content))
+/// }
+/// ```
+macro_rules! parser_stack {
+    ($type:ty => $($args:expr),* $(,)*) => {
+        static PARSER_STACK: ParserStack<$type> = Lazy::new(|| vec![$($args,)*]);
+    };
+}
+
 /// Parse the node as a scope event.
 #[tracing::instrument(skip_all)]
-pub fn scope(node: Node<'_>) -> Option<Scope> {
-    let node_loc = || node.byte_range().pipe(Location::from);
-    if node.kind() == NODE_KIND_OPEN_BRACE {
-        let loc = node_loc();
-        trace!(%loc, kind = "scope_enter");
-        Scope::Enter(loc).pipe(Some)
-    } else if node.kind() == NODE_KIND_CLOSE_BRACE {
-        let loc = node_loc();
-        trace!(%loc, kind = "scope_exit");
-        Scope::Exit(loc).pipe(Some)
-    } else {
-        None
-    }
+pub fn scope(node: Node<'_>, content: &[u8]) -> Option<Scope> {
+    parser_stack!(Scope => scope_enter, scope_exit);
+    some(&mut PARSER_STACK.iter(), |parser| parser(node, content))
+}
+
+#[tracing::instrument(skip_all)]
+fn scope_enter(node: Node<'_>, _: &[u8]) -> Option<Scope> {
+    ensure_node_kind!(node, NODE_KIND_OPEN_BRACE);
+    Scope::Enter(Location::from(node)).pipe(Some)
+}
+
+#[tracing::instrument(skip_all)]
+fn scope_exit(node: Node<'_>, _: &[u8]) -> Option<Scope> {
+    ensure_node_kind!(node, NODE_KIND_CLOSE_BRACE);
+    Scope::Exit(Location::from(node)).pipe(Some)
 }
 
 /// Attempt to parse the node as any supported symbol.
 #[tracing::instrument(skip_all)]
 pub fn symbol(node: Node<'_>, content: &[u8]) -> Option<Symbol<Kind>> {
-    // Not critical, but try to keep the list in order of most commonly seen symbols.
-    static PARSERS: Lazy<Vec<Parser>> = Lazy::new(|| {
-        vec![
-            invocation,
-            method,
-            field,
-            constructor,
-            class,
-            import,
-            package,
-        ]
-    });
-    crate::parser::iter::parse_some(&mut PARSERS.iter(), |parser| parser(node, content))
+    parser_stack!(
+        Symbol<Kind> =>
+        invocation,
+        method,
+        field,
+        constructor,
+        class,
+        import,
+        package
+    );
+    some(&mut PARSER_STACK.iter(), |parser| parser(node, content))
 }
 
 #[tracing::instrument(skip_all)]
 fn package(node: Node<'_>, content: &[u8]) -> Option<Symbol<Kind>> {
-    ensure_node_kind!(node, content, "package_declaration");
+    ensure_node_kind!(node, "package_declaration");
 
     let mut ctx = traverse_statement(node, content);
     let name = parse_some!(ctx => content, if_kind, "package_declaration");
@@ -124,7 +160,7 @@ fn package(node: Node<'_>, content: &[u8]) -> Option<Symbol<Kind>> {
 
 #[tracing::instrument(skip_all)]
 fn import(node: Node<'_>, content: &[u8]) -> Option<Symbol<Kind>> {
-    ensure_node_kind!(node, content, "import_declaration");
+    ensure_node_kind!(node, "import_declaration");
 
     let mut ctx = traverse_statement(node, content);
     let name = parse_some!(ctx => content, if_kind, "import_declaration");
@@ -133,7 +169,7 @@ fn import(node: Node<'_>, content: &[u8]) -> Option<Symbol<Kind>> {
 
 #[tracing::instrument(skip_all)]
 fn class(node: Node<'_>, content: &[u8]) -> Option<Symbol<Kind>> {
-    ensure_node_kind!(node, content, "class_declaration");
+    ensure_node_kind!(node, "class_declaration");
 
     let mut ctx = traverse_while(node, content, |node| node.kind() != "class_body");
     let visibility = parse_some!(ctx => content, visibility);
@@ -147,7 +183,7 @@ fn class(node: Node<'_>, content: &[u8]) -> Option<Symbol<Kind>> {
 
 #[tracing::instrument(skip_all)]
 fn constructor(node: Node<'_>, content: &[u8]) -> Option<Symbol<Kind>> {
-    ensure_node_kind!(node, content, "constructor_declaration");
+    ensure_node_kind!(node, "constructor_declaration");
 
     let mut ctx = traverse_while(node, content, |node| node.kind() != "constructor_body");
     let visibility = parse_some!(ctx => content, visibility);
@@ -162,7 +198,7 @@ fn constructor(node: Node<'_>, content: &[u8]) -> Option<Symbol<Kind>> {
 
 #[tracing::instrument(skip_all)]
 fn field(node: Node<'_>, content: &[u8]) -> Option<Symbol<Kind>> {
-    ensure_node_kind!(node, content, "field_declaration");
+    ensure_node_kind!(node, "field_declaration");
 
     let mut stmt = traverse_statement(node, content);
     let visibility = parse_some!(stmt => content, visibility);
@@ -177,41 +213,37 @@ fn field(node: Node<'_>, content: &[u8]) -> Option<Symbol<Kind>> {
 
 #[tracing::instrument(skip_all)]
 fn method(node: Node<'_>, content: &[u8]) -> Option<Symbol<Kind>> {
-    ensure_node_kind!(node, content, "method_declaration");
+    ensure_node_kind!(node, "method_declaration");
 
     let mut ctx = traverse_while(node, content, |node| node.kind() != "block");
     let visibility = parse_some!(ctx => content, visibility);
     let name = parse_some!(ctx => content, if_kind, "identifier");
-
-    // TODO: need to collapse to abstract types
-    let params = parse_some!(ctx => content, if_kind, "formal_parameters");
+    let signature = format!("{}(_)", name.inner);
 
     symbol!(
-        Kind::new_method(visibility.inner, name.inner + params.inner),
-        visibility.loc + name.loc + params.loc,
+        Kind::new_method(visibility.inner, signature),
+        visibility.loc + name.loc,
     )
 }
 
 #[tracing::instrument(skip_all)]
 fn invocation(node: Node<'_>, content: &[u8]) -> Option<Symbol<Kind>> {
-    ensure_node_kind!(node, content, "method_invocation");
+    ensure_node_kind!(node, "method_invocation");
 
     let mut ctx = traverse_statement(node, content);
     let target = parse_some!(ctx => content, if_kind, "identifier");
     let name = parse_some!(ctx => content, if_kind, "identifier");
-
-    // TODO: need to collapse to abstract types
-    let params = parse_some!(ctx => content, if_kind, "argument_list");
+    let signature = format!("{}(_)", name.inner);
 
     symbol!(
-        Kind::new_invocation(name.inner + params.inner, target.inner),
-        target.loc + name.loc + params.loc,
+        Kind::new_invocation(signature, target.inner),
+        target.loc + name.loc,
     )
 }
 
 #[tracing::instrument(skip_all)]
 fn visibility(node: Node<'_>, content: &[u8]) -> Option<Extracted<Visibility>> {
-    ensure_node_kind!(node, content, "modifiers");
+    ensure_node_kind!(node, "modifiers");
     extract(node, content)
         .map(|modifiers| {
             if modifiers.contains("public") {
@@ -224,41 +256,132 @@ fn visibility(node: Node<'_>, content: &[u8]) -> Option<Extracted<Visibility>> {
         .pipe(Some)
 }
 
+#[tracing::instrument(skip_all)]
+fn method_params(node: Node<'_>, content: &[u8]) -> Option<Extracted<String>> {
+    // treesitter provides "argument_list" when reading a method invocation,
+    // and "formal_parameters" when reading a method declaration.
+    ensure_node_kind!(node, "argument_list", "formal_parameters");
+
+    let mut ctx = traverse(node, content);
+    some(&mut ctx, |node| if_kind(node, content, "("));
+    many_while(
+        &mut ctx,
+        |node| node.kind() != ")",
+        |node| abstracted_type(node, content),
+    )
+    .sum::<Extracted<String>>()
+    .into_option()
+}
+
+#[tracing::instrument(skip_all)]
+fn abstracted_type(node: Node<'_>, content: &[u8]) -> Option<Extracted<String>> {
+    parser_stack!(
+        Extracted<String> =>
+        arg_string_literal,
+        arg_integral,
+        arg_spread_param,
+        arg_method_invocation,
+    );
+    some(&mut PARSER_STACK.iter(), |parser| parser(node, content))
+}
+
+#[tracing::instrument(skip_all)]
+fn arg_string_literal(node: Node<'_>, _: &[u8]) -> Option<Extracted<String>> {
+    ensure_node_kind!(node, "string_literal");
+    Extracted::new("String", node).pipe(Some)
+}
+
+#[tracing::instrument(skip_all)]
+fn arg_method_invocation(node: Node<'_>, _: &[u8]) -> Option<Extracted<String>> {
+    ensure_node_kind!(node, "method_invocation");
+    Extracted::new("_", node).pipe(Some)
+}
+
+#[tracing::instrument(skip_all)]
+fn arg_integral(node: Node<'_>, content: &[u8]) -> Option<Extracted<String>> {
+    ensure_node_kind!(node, "integral_type");
+    extract(node, content).map(String::from).pipe(Some)
+}
+
+#[tracing::instrument(skip_all)]
+fn arg_spread_param(node: Node<'_>, content: &[u8]) -> Option<Extracted<String>> {
+    ensure_node_kind!(node, "spread_parameter");
+    extract(node, content)
+        .map(|inner| {
+            inner
+                .split_once(' ')
+                .map(|(fst, _)| fst.to_string())
+                .unwrap_or_else(|| inner.to_string())
+        })
+        .pipe(Some)
+}
+
 fn if_kind<'a>(
     node: Node<'_>,
     content: &'a [u8],
     kind: impl AsRef<str>,
 ) -> Option<Extracted<Cow<'a, str>>> {
-    ensure_node_kind!(node, content, kind.as_ref());
+    ensure_node_kind!(node, kind.as_ref());
     extract(node, content).pipe(Some)
 }
 
-/// Traverses the children of a node in the syntax tree until the
-/// statement ends (a semicolon is observed).
+/// Traverse children of a node in the syntax tree
+/// until the statement ends (a semicolon is observed).
 fn traverse_statement<'a>(node: Node<'a>, content: &'a [u8]) -> impl Iterator<Item = Node<'a>> {
     traverse_while(node, content, |node| node.kind() != NODE_KIND_SEMI)
 }
 
+/// Traverse children of a node in the syntax tree
+/// while the predicate returns true.
 fn traverse_while<'a>(
     node: Node<'a>,
     content: &'a [u8],
     pred: impl FnMut(&Node<'a>) -> bool,
 ) -> impl Iterator<Item = Node<'a>> {
-    traverse(node.walk(), Order::Pre)
-        .inspect_nodes(content)
-        .take_while(pred)
+    traverse(node, content).take_while(pred)
 }
 
+/// Traverse children of a node in the syntax tree.
+fn traverse<'a>(node: Node<'a>, content: &'a [u8]) -> impl Iterator<Item = Node<'a>> {
+    tree_sitter_traversal::traverse(node.walk(), tree_sitter_traversal::Order::Pre)
+        .inspect_nodes(content)
+}
+
+#[derive(Debug, Default)]
 struct Extracted<T> {
     inner: T,
     loc: Location,
 }
 
 impl<T> Extracted<T> {
+    /// Construct a new instance.
+    fn new(inner: impl Into<T>, loc: impl Into<Location>) -> Self {
+        Extracted {
+            inner: inner.into(),
+            loc: loc.into(),
+        }
+    }
+
+    /// Use the provided closure to map the interior data.
     fn map<U>(self, map: impl FnOnce(T) -> U) -> Extracted<U> {
         Extracted {
             inner: map(self.inner),
             loc: self.loc,
+        }
+    }
+
+    /// Whether the extracted item is empty.
+    fn is_empty(&self) -> bool {
+        self.loc.is_empty()
+    }
+
+    /// Map self into an option. If empty, maps to [`None`];
+    /// otherwise maps to [`Some`].
+    fn into_option(self) -> Option<Self> {
+        if self.is_empty() {
+            None
+        } else {
+            Some(self)
         }
     }
 }
@@ -266,6 +389,21 @@ impl<T> Extracted<T> {
 impl From<Extracted<Kind>> for Symbol<Kind> {
     fn from(value: Extracted<Kind>) -> Self {
         Self::new(value.inner, value.loc)
+    }
+}
+
+impl std::iter::Sum for Extracted<String> {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        iter.fold(Extracted::<Vec<String>>::default(), |mut acc, item| {
+            if acc.is_empty() {
+                item.map(|inner| vec![inner])
+            } else {
+                acc.loc += item.loc;
+                acc.inner.push(item.inner);
+                acc
+            }
+        })
+        .map(|inner| inner.join(", "))
     }
 }
 

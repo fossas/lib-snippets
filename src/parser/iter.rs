@@ -1,54 +1,58 @@
 //! Types and helpers for treating iterators
 //! in a manner similar to combinatorial parsers.
 //!
-//! The goal isn't to replicate a full combinatorial parser yet;
+//! The goal isn't to replicate a full combinatorial parser;
 //! just steal some ideas from the concept.
+//!
+//! Longer term I'd like to either convert this to a full blown
+//! combinatorial parser library, or adapt nom/something similar
+//! to work over arbitrary types instead of bytes
+//! (this can be done today but is very complicated,
+//! so I didn't take the time).
 
 /// Describes a generic parser that works with this module.
-pub trait Parser<I: Iterator, T>: Fn(I::Item) -> Option<T> {}
-impl<I: Iterator, F: Fn(I::Item) -> Option<T>, T> Parser<I, T> for F {}
+pub trait Parser<I, T>: Fn(I) -> Option<T> {}
+impl<I, F: Fn(I) -> Option<T>, T> Parser<I, T> for F {}
 
-/// Iterates until the first item for which the provided parser returns `Some`.
+/// Parses the input, searching for the first item
+/// for which the provided parser returns `Some`.
+/// Once found, returns that parsed result.
 ///
-/// Items read from the iterator until that point are dropped.
-/// The returned `Some` value is the result of this function.
-pub fn parse_some<I: Iterator, T>(iter: &mut I, parser: impl Parser<I, T>) -> Option<T> {
-    for item in iter {
-        if let Some(parsed) = parser(item) {
-            return Some(parsed);
-        }
-    }
-    None
+/// Items read from the iterator that fail to parse are dropped.
+pub fn some<I: Iterator, T>(input: &mut I, parser: impl Parser<I::Item, T>) -> Option<T> {
+    input.find_map(parser)
 }
 
-/// Copies the provided context alongside each iterator entry.
-pub struct ContextIter<I, C> {
-    iter: I,
-    context: C,
+/// Parses while the predicate returns true, searching for the first item
+/// for which the provided parser returns `Some`.
+/// Once found, returns that parsed result.
+///
+/// The item for which the predicate
+/// returns false is consumed from the iterator.
+/// Items read from the iterator that fail to parse are dropped.
+pub fn some_while<I: Iterator, T>(
+    input: &mut I,
+    pred: impl Fn(&I::Item) -> bool,
+    parser: impl Parser<I::Item, T>,
+) -> Option<T> {
+    some(&mut input.take_while(pred), parser)
 }
 
-/// An item in the iterator that has context.
-pub type ContextItem<T, C> = (T, C);
-
-impl<I: Iterator, C: Copy> Iterator for ContextIter<I, C> {
-    type Item = ContextItem<I::Item, C>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.iter.next().map(|item| (item, self.context))
-    }
+/// Greedily performs [`some`] until the input is done.
+/// In the case that no items were parsed, the returned vector is empty.
+pub fn many<'a, I: Iterator, T>(
+    input: &'a mut I,
+    parser: impl Parser<I::Item, T> + 'a,
+) -> impl Iterator<Item = T> + 'a {
+    std::iter::from_fn(move || some(input, &parser))
 }
 
-/// Adaptor to map the provided context into each iterator entry.
-pub trait ToContextIter<I, C> {
-    /// Copies the provided context alongside each iterator entry.
-    fn context(self, context: C) -> ContextIter<I, C>;
-}
-
-impl<I: Iterator, C: Copy> ToContextIter<I, C> for I {
-    fn context(self, context: C) -> ContextIter<I, C> {
-        ContextIter {
-            iter: self,
-            context,
-        }
-    }
+/// Greedily performs [`some_while`] until the input is done.
+/// In the case that no items were parsed, the returned vector is empty.
+pub fn many_while<'a, I: Iterator, T>(
+    input: &'a mut I,
+    pred: impl Fn(&I::Item) -> bool + 'a,
+    parser: impl Parser<I::Item, T> + 'a,
+) -> impl Iterator<Item = T> + 'a {
+    std::iter::from_fn(move || some_while(input, &pred, &parser))
 }

@@ -3,7 +3,7 @@ use getset::{CopyGetters, Getters};
 use tap::Pipe;
 use tracing::trace;
 
-use crate::{ext::iter::PeekingExt, parser::bytes::Location};
+use crate::parser::bytes::Location;
 
 /// A stack models the types in a given source code file.
 ///
@@ -174,8 +174,7 @@ impl<T: PartialEq> Stack<T> {
         self.entries
             .iter()
             .rev()
-            .peeking_skip_until(move |entry| entry == symbol)
-            .skip(1)
+            .skip_while(move |entry| entry != symbol)
             .pipe(ScopedStackIterator::new)
     }
 
@@ -185,6 +184,12 @@ impl<T: PartialEq> Stack<T> {
 
     delegate! {
         to self.entries {
+            /// Iterate over the entries in the stack.
+            ///
+            /// Note that `retrace` and `retrace_from`
+            /// are usually more useful.
+            pub fn iter(&self) -> impl Iterator<Item = &Entry<T>>;
+
             /// Get the last entry in the stack.
             pub fn last(&self) -> Option<&Entry<T>>;
         }
@@ -343,10 +348,10 @@ where
             // Multiple exits may come one after another.
             // Keep a running count until the same number of enters have been passed.
             Entry::Exit(_) => {
-                let mut exit_count = 1;
+                let mut exit_count = 1usize;
                 for entry in self.iter.by_ref() {
                     match entry {
-                        Entry::Enter(_) => exit_count -= 1,
+                        Entry::Enter(_) => exit_count = exit_count.saturating_sub(1),
                         Entry::Exit(_) => exit_count += 1,
                         _ => {}
                     }

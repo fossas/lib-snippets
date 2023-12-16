@@ -11,22 +11,26 @@
 //!
 //! [`Extractor`]: crate::Extractor
 
+use std::fmt::Write;
+
+use colored::Colorize;
 use derive_more::Constructor;
 use getset::{CopyGetters, Getters};
 use tap::{Pipe, Tap};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 use tree_sitter::Node;
 use tree_sitter_traversal::{traverse_tree, Order};
 
 use crate::{
     content::Content,
     debugging::{inspect_node, NodeInspector, ToDisplayEscaped},
+    ext::vec::FunctionalVec,
     impl_language,
     impl_prelude::*,
     parser::{
         bytes::Location,
         java::{scope, symbol, Kind, Scope},
-        stack::Stack,
+        stack::{Entry, Stack},
         NODE_KIND_CONSTRUCTOR_DECL, NODE_KIND_METHOD_DECL,
     },
 };
@@ -198,7 +202,7 @@ impl SnippetExtractor for CallGraphExtractor {
     type Options = EmptyOptions;
     type Output = Vec<CallGraphEntry>;
 
-    #[tracing::instrument(skip_all, fields(content_len = content.as_bytes().len()))]
+    #[tracing::instrument(skip_all)]
     fn extract(_: &Self::Options, content: &Content) -> Result<Self::Output, Error> {
         let mut parser = parser()?;
 
@@ -231,7 +235,7 @@ impl SnippetExtractor for CallGraphExtractor {
         // becuase each given symbol may depend on things that come
         // later in the file.
         for node in traverse_tree(&tree, Order::Pre).inspect_nodes(content) {
-            if let Some(scope) = scope(node) {
+            if let Some(scope) = scope(node, content) {
                 match scope {
                     Scope::Enter(location) => stack.enter(location),
                     Scope::Exit(location) => stack.exit(location),
@@ -249,10 +253,52 @@ impl SnippetExtractor for CallGraphExtractor {
         // it's copied here for export. This way the stack can be freely
         // modified without changing the exported results,
         // which may depend on elements in the stack.
-        let mut entries = Vec::new();
+        // let mut entries = Vec::new();
 
-        Ok(entries)
+        for entry in stack.iter() {
+            let Entry::Symbol(symbol) = entry else {
+                continue;
+            };
+
+            if let Kind::Invocation { .. } = symbol.inner() {
+                info!("Invocation stack:");
+                info!("{:?}", symbol.inner());
+                for (i, parent) in stack.retrace_from(symbol).enumerate() {
+                    let indent = "  ".repeat(i + 1);
+                    info!("{indent}← {:?}", parent.inner());
+                }
+
+                let context = stack
+                    .retrace_from(symbol)
+                    .map(|s| s.location())
+                    .collect::<Vec<_>>()
+                    .reversed();
+                debug!("Context:\n{}", render_overlaid_context(content, &context));
+
+                info!("-----");
+            }
+        }
+
+        Ok(vec![])
     }
+}
+
+fn render_overlaid_context(content: &[u8], context: &[Location]) -> String {
+    let in_context =
+        |offset: usize| -> bool { context.iter().any(|loc| loc.as_range().contains(&offset)) };
+
+    let mut output = String::new();
+
+    let content = content.iter().copied().map(char::from).map(String::from);
+    for (b, c) in content.enumerate() {
+        if in_context(b) {
+            write!(&mut output, "{c}").expect("write to buffer");
+        } else {
+            write!(&mut output, "{}", c.dimmed()).expect("write to buffer");
+        }
+    }
+
+    output
 }
 
 /// A method declaration in source code.
