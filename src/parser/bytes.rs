@@ -108,7 +108,7 @@ impl Location {
     /// # Example
     ///
     /// ```
-    /// # use snippets::*;
+    /// # use snippets::parser::bytes::*;
     /// let example = "#include <stdio.h>  int main() {}";
     /// let location = Location::builder().byte_offset(20).byte_len(10).build();
     ///
@@ -125,7 +125,7 @@ impl Location {
     /// # Example
     ///
     /// ```
-    /// # use snippets::*;
+    /// # use snippets::parser::bytes::*;
     /// let example = "#include <stdio.h>  int main() {}";
     /// let location = Location::builder().byte_offset(20).byte_len(10).build();
     ///
