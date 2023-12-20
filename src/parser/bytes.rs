@@ -7,7 +7,6 @@ use std::{
 
 use derive_more::{Add, AddAssign, Display, Sub, SubAssign};
 use getset::CopyGetters;
-use miette::SourceSpan;
 use tree_sitter::Node;
 use typed_builder::TypedBuilder;
 
@@ -177,15 +176,6 @@ impl From<RangeInclusive<usize>> for Location {
 impl From<Node<'_>> for Location {
     fn from(value: Node<'_>) -> Self {
         value.byte_range().into()
-    }
-}
-
-impl From<Location> for SourceSpan {
-    fn from(value: Location) -> Self {
-        Self::new(
-            value.byte_offset().as_usize().into(),
-            value.byte_len().as_usize().into(),
-        )
     }
 }
 
