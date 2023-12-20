@@ -23,6 +23,7 @@ lang-java-11 = ["tree-sitter-java"]
 
 [dependencies]
 base64 = "0.21.2"
+bstr = "1.8.0"
 colored = "2.1.0"
 delegate = "0.10.0"
 derivative = "2.2.0"

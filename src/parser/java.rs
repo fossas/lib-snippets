@@ -23,34 +23,34 @@
 
 use std::borrow::Cow;
 
-use enum_common_fields::EnumCommonFields;
+use itertools::Itertools;
+use lazy_regex::regex_is_match;
 use once_cell::sync::Lazy;
 use tap::{Pipe, Tap};
 use tracing::trace;
-use tree_sitter::Node;
+use tree_sitter::Node as TSNode;
 
 use crate::{
     debugging::NodeInspector,
-    parser::{
-        iter::{many_while, some},
-        NODE_KIND_SEMI,
-    },
+    ext::vec::FunctionalVec,
+    language::java_11::Node,
+    parser::{iter::some, Argument, Parameter, Symbol, Visibility, NODE_KIND_SEMI},
 };
 
-use super::{bytes::Location, stack::Symbol, NODE_KIND_CLOSE_BRACE, NODE_KIND_OPEN_BRACE};
+use super::{bytes::Location, Scope, NODE_KIND_CLOSE_BRACE, NODE_KIND_OPEN_BRACE};
 
 /// A parser is any function that implements this type.
-type Parser<T> = fn(Node<'_>, &[u8]) -> Option<T>;
+type Parser<T> = fn(TSNode<'_>, &[u8]) -> Option<T>;
 
 /// Wrap a [`Parser`] with the provided `content` so that it fits the shape
 /// expected by [`crate::parser::iter`] (which expects a function that
 /// accepts a single argument).
 macro_rules! parser {
     ($content:expr, $parser:expr) => {
-        |node: Node<'_>| $parser(node, $content)
+        |node: TSNode<'_>| $parser(node, $content)
     };
     ($content:expr, $parser:expr, $($args:expr),* $(,)*) => {
-        |node: Node<'_>| $parser(node, $content, $($args,)*)
+        |node: TSNode<'_>| $parser(node, $content, $($args,)*)
     };
 }
 
@@ -103,7 +103,7 @@ type ParserStack<T> = Lazy<Vec<Parser<T>>>;
 ///
 /// Using this and [`some`], one can form an analogue to an "alternative" parser combinator:
 /// ```ignore
-/// pub fn scope(node: Node<'_>, content: &[u8]) -> Option<Scope> {
+/// pub fn scope(node: TSNode<'_>, content: &[u8]) -> Option<Scope> {
 ///     parser_stack!(Scope => scope_enter, scope_exit);
 ///     some(&mut PARSER_STACK.iter(), |parser| parser(node, content))
 /// }
@@ -116,28 +116,28 @@ macro_rules! parser_stack {
 
 /// Parse the node as a scope event.
 #[tracing::instrument(skip_all)]
-pub fn scope(node: Node<'_>, content: &[u8]) -> Option<Scope> {
+pub fn scope(node: TSNode<'_>, content: &[u8]) -> Option<Scope> {
     parser_stack!(Scope => scope_enter, scope_exit);
     some(&mut PARSER_STACK.iter(), |parser| parser(node, content))
 }
 
 #[tracing::instrument(skip_all)]
-fn scope_enter(node: Node<'_>, _: &[u8]) -> Option<Scope> {
+fn scope_enter(node: TSNode<'_>, _: &[u8]) -> Option<Scope> {
     ensure_node_kind!(node, NODE_KIND_OPEN_BRACE);
     Scope::Enter(Location::from(node)).pipe(Some)
 }
 
 #[tracing::instrument(skip_all)]
-fn scope_exit(node: Node<'_>, _: &[u8]) -> Option<Scope> {
+fn scope_exit(node: TSNode<'_>, _: &[u8]) -> Option<Scope> {
     ensure_node_kind!(node, NODE_KIND_CLOSE_BRACE);
     Scope::Exit(Location::from(node)).pipe(Some)
 }
 
 /// Attempt to parse the node as any supported symbol.
 #[tracing::instrument(skip_all)]
-pub fn symbol(node: Node<'_>, content: &[u8]) -> Option<Symbol<Kind>> {
+pub fn symbol(node: TSNode<'_>, content: &[u8]) -> Option<Symbol<Node>> {
     parser_stack!(
-        Symbol<Kind> =>
+        Symbol<Node> =>
         invocation,
         method,
         field,
@@ -150,99 +150,210 @@ pub fn symbol(node: Node<'_>, content: &[u8]) -> Option<Symbol<Kind>> {
 }
 
 #[tracing::instrument(skip_all)]
-fn package(node: Node<'_>, content: &[u8]) -> Option<Symbol<Kind>> {
+fn package(node: TSNode<'_>, content: &[u8]) -> Option<Symbol<Node>> {
     ensure_node_kind!(node, "package_declaration");
 
     let mut ctx = traverse_statement(node, content);
-    let name = parse_some!(ctx => content, if_kind, "package_declaration");
-    symbol!(Kind::new_import(name.inner), name.loc)
+    let name = parse_some!(ctx => content, if_kind, "scoped_identifier");
+
+    symbol!(Node::new_package(name.inner), name.loc)
 }
 
 #[tracing::instrument(skip_all)]
-fn import(node: Node<'_>, content: &[u8]) -> Option<Symbol<Kind>> {
+fn import(node: TSNode<'_>, content: &[u8]) -> Option<Symbol<Node>> {
     ensure_node_kind!(node, "import_declaration");
 
     let mut ctx = traverse_statement(node, content);
-    let name = parse_some!(ctx => content, if_kind, "import_declaration");
-    symbol!(Kind::new_import(name.inner), name.loc)
+    let name = parse_some!(ctx => content, if_kind, "scoped_identifier");
+    symbol!(Node::new_import(name.inner), name.loc)
 }
 
 #[tracing::instrument(skip_all)]
-fn class(node: Node<'_>, content: &[u8]) -> Option<Symbol<Kind>> {
+fn class(node: TSNode<'_>, content: &[u8]) -> Option<Symbol<Node>> {
     ensure_node_kind!(node, "class_declaration");
 
+    // Since visibility modifiers come first, but are optional,
+    // to parse these we need backtracking in the iterator parser.
+    // I don't have this built yet, so just assume all modifiers are public
+    // for now.
+    let visibility = Visibility::Public;
+
     let mut ctx = traverse_while(node, content, |node| node.kind() != "class_body");
-    let visibility = parse_some!(ctx => content, visibility);
     let name = parse_some!(ctx => content, if_kind, "identifier");
 
-    symbol!(
-        Kind::new_class(visibility.inner, name.inner),
-        visibility.loc + name.loc,
-    )
+    symbol!(Node::new_class(visibility, name.inner), name.loc,)
 }
 
 #[tracing::instrument(skip_all)]
-fn constructor(node: Node<'_>, content: &[u8]) -> Option<Symbol<Kind>> {
+fn constructor(node: TSNode<'_>, content: &[u8]) -> Option<Symbol<Node>> {
     ensure_node_kind!(node, "constructor_declaration");
 
+    // Since visibility modifiers come first, but are optional,
+    // to parse these we need backtracking in the iterator parser.
+    // I don't have this built yet, so just assume all modifiers are public
+    // for now.
+    let visibility = Visibility::Public;
+
     let mut ctx = traverse_while(node, content, |node| node.kind() != "constructor_body");
-    let visibility = parse_some!(ctx => content, visibility);
     let name = parse_some!(ctx => content, if_kind, "identifier");
-    let params = parse_some!(ctx => content, if_kind, "formal_parameters");
+    let args = parse_some!(ctx => content, method_params);
 
     symbol!(
-        Kind::new_method(visibility.inner, name.inner + params.inner),
-        visibility.loc + name.loc + params.loc,
+        Node::new_constructor(visibility, name.inner, args.inner),
+        name.loc + args.loc,
     )
 }
 
 #[tracing::instrument(skip_all)]
-fn field(node: Node<'_>, content: &[u8]) -> Option<Symbol<Kind>> {
+fn field(node: TSNode<'_>, content: &[u8]) -> Option<Symbol<Node>> {
     ensure_node_kind!(node, "field_declaration");
 
-    let mut stmt = traverse_statement(node, content);
-    let visibility = parse_some!(stmt => content, visibility);
-    let type_name = parse_some!(stmt => content, if_kind, "type_identifier");
-    let name = parse_some!(stmt => content, if_kind, "identifier");
-
-    symbol!(
-        Kind::new_variable(visibility.inner, name.inner, type_name.inner),
-        visibility.loc + type_name.loc + name.loc,
-    )
-}
-
-#[tracing::instrument(skip_all)]
-fn method(node: Node<'_>, content: &[u8]) -> Option<Symbol<Kind>> {
-    ensure_node_kind!(node, "method_declaration");
-
-    let mut ctx = traverse_while(node, content, |node| node.kind() != "block");
-    let visibility = parse_some!(ctx => content, visibility);
-    let name = parse_some!(ctx => content, if_kind, "identifier");
-    let signature = format!("{}(_)", name.inner);
-
-    symbol!(
-        Kind::new_method(visibility.inner, signature),
-        visibility.loc + name.loc,
-    )
-}
-
-#[tracing::instrument(skip_all)]
-fn invocation(node: Node<'_>, content: &[u8]) -> Option<Symbol<Kind>> {
-    ensure_node_kind!(node, "method_invocation");
+    // Since visibility modifiers come first, but are optional,
+    // to parse these we need backtracking in the iterator parser.
+    // I don't have this built yet, so just assume all modifiers are public
+    // for now.
+    let visibility = Visibility::Public;
 
     let mut ctx = traverse_statement(node, content);
-    let target = parse_some!(ctx => content, if_kind, "identifier");
+    let type_name = parse_some!(ctx => content, if_kind, "type_identifier");
     let name = parse_some!(ctx => content, if_kind, "identifier");
-    let signature = format!("{}(_)", name.inner);
 
     symbol!(
-        Kind::new_invocation(signature, target.inner),
-        target.loc + name.loc,
+        Node::new_variable(visibility, name.inner, type_name.inner),
+        type_name.loc + name.loc,
     )
 }
 
 #[tracing::instrument(skip_all)]
-fn visibility(node: Node<'_>, content: &[u8]) -> Option<Extracted<Visibility>> {
+fn method(node: TSNode<'_>, content: &[u8]) -> Option<Symbol<Node>> {
+    ensure_node_kind!(node, "method_declaration");
+
+    // Since visibility modifiers come first, but are optional,
+    // to parse these we need backtracking in the iterator parser.
+    // I don't have this built yet, so just assume all modifiers are public
+    // for now.
+    let visibility = Visibility::Public;
+
+    let mut ctx = traverse_while(node, content, |node| node.kind() != "block");
+    let name = parse_some!(ctx => content, if_kind, "identifier");
+    let args = parse_some!(ctx => content, method_params);
+
+    symbol!(
+        Node::new_method(visibility, name.inner, args.inner),
+        name.loc + args.loc
+    )
+}
+
+#[tracing::instrument(skip_all)]
+fn invocation(node: TSNode<'_>, content: &[u8]) -> Option<Symbol<Node>> {
+    ensure_node_kind!(node, "method_invocation");
+
+    // Invocations are commonly in the form `target.name()`, but can also just be `name()`.
+    // In the latter case, `target` is assumed to be the current class.
+    // Invocations can also use a multipart path, like `System.out.println`.
+    let mut ctx = traverse_statement(node, content).peekable();
+    let mut target = Vec::new();
+    let name = loop {
+        let name_or_target = parse_some!(ctx => content, if_kind, "identifier");
+        if ctx.peek().map(|n| n.kind()) == Some(".") {
+            target.push(name_or_target);
+        } else {
+            break name_or_target;
+        }
+    };
+    let args = parse_some!(ctx => content, invocation_arguments);
+
+    let target = if target.is_empty() {
+        Extracted::new("this", name.loc)
+    } else {
+        target
+            .into_iter()
+            .fold(Extracted::<Vec<String>>::default(), |acc, item| {
+                if acc.is_empty() {
+                    item.map(|inner| vec![inner.to_string()])
+                } else {
+                    Extracted {
+                        inner: acc.inner.pushed(item.inner.to_string()),
+                        loc: acc.loc + item.loc,
+                    }
+                }
+            })
+            .map(|inner| inner.join("."))
+    };
+
+    symbol!(
+        Node::new_invocation(name.inner, target.inner, args.inner),
+        target.loc + name.loc + args.loc,
+    )
+}
+
+#[tracing::instrument(skip_all)]
+fn method_params<'a>(node: TSNode<'_>, content: &'a [u8]) -> Option<Extracted<Vec<Parameter>>> {
+    // treesitter provides "argument_list" when reading a method invocation,
+    // and "formal_parameters" when reading a method declaration.
+    ensure_node_kind!(node, "formal_parameters");
+
+    // In the future, we probably need to use nom to parse the declared types for method declarations.
+    // This should work because one has to declare the type of arguments in declarations.
+    // Remember complex types types exist (e.g. `Map<String, int> map`),
+    // so simply splitting on `,` or spaces isnt' good enough.
+    //
+    // For now, just handle the cases of "no arguments" or "some arguments";
+    // the latter becomes a wildcard variadic argument, so it can accept
+    // any number of any type of argument.
+    extract(node, content)
+        .map(|inner| {
+            if inner == "()" {
+                Vec::new()
+            } else {
+                vec![Parameter::Variadic(Argument::Any)]
+            }
+        })
+        .pipe(Some)
+}
+
+#[tracing::instrument(skip_all)]
+fn invocation_arguments<'a>(
+    node: TSNode<'_>,
+    content: &'a [u8],
+) -> Option<Extracted<Vec<Argument>>> {
+    ensure_node_kind!(node, "argument_list");
+
+    // In the future, we probably need to use treesitter's node kinds to determine input types.
+    // For example, `kind=string_literal` maps to `String`.
+    // This will likely need to also be able to indicate a variable that can be looked up in the stack
+    // by the caller to determine its type; this is likely at least one additional
+    // variant to the `Argument` type.
+    //
+    // For now, just turn every distinct argument into a wildcard.
+    let raw = &*extract(node, content).inner;
+
+    // Early check: if this is an empty set of parethesis, or there is only whitespace between them,
+    // just return an empty argument set.
+    if regex_is_match!(r"\(\s*\)", raw) {
+        return Extracted::new(Vec::new(), node).pipe(Some);
+    }
+
+    // Otherwise, count the comma nodes emitted by treesitter to find the argument count.
+    // Since the "no arguments" case was already checked, assume "no commas" means "one argument"
+    // (so really, "argument count" is just "comma count + 1").
+    let count = traverse(node, content)
+        .filter(|node| node.kind() == ",")
+        .count();
+    let args = std::iter::repeat(Argument::Any)
+        .take(count + 1)
+        .collect_vec();
+    Extracted::new(args, node).pipe(Some)
+}
+
+/// Since visibility modifiers come first, but are optional,
+/// to parse these we need backtracking in the iterator parser.
+///
+/// This is not built yet, so we assume all modifiers are public for now;
+/// leaving this parser unused- leaving it in the code though because
+/// it _should_ be good to go once backtracking is implemented.
+#[tracing::instrument(skip_all)]
+fn visibility(node: TSNode<'_>, content: &[u8]) -> Option<Extracted<Visibility>> {
     ensure_node_kind!(node, "modifiers");
     extract(node, content)
         .map(|modifiers| {
@@ -256,68 +367,8 @@ fn visibility(node: Node<'_>, content: &[u8]) -> Option<Extracted<Visibility>> {
         .pipe(Some)
 }
 
-#[tracing::instrument(skip_all)]
-fn method_params(node: Node<'_>, content: &[u8]) -> Option<Extracted<String>> {
-    // treesitter provides "argument_list" when reading a method invocation,
-    // and "formal_parameters" when reading a method declaration.
-    ensure_node_kind!(node, "argument_list", "formal_parameters");
-
-    let mut ctx = traverse(node, content);
-    some(&mut ctx, |node| if_kind(node, content, "("));
-    many_while(
-        &mut ctx,
-        |node| node.kind() != ")",
-        |node| abstracted_type(node, content),
-    )
-    .sum::<Extracted<String>>()
-    .into_option()
-}
-
-#[tracing::instrument(skip_all)]
-fn abstracted_type(node: Node<'_>, content: &[u8]) -> Option<Extracted<String>> {
-    parser_stack!(
-        Extracted<String> =>
-        arg_string_literal,
-        arg_integral,
-        arg_spread_param,
-        arg_method_invocation,
-    );
-    some(&mut PARSER_STACK.iter(), |parser| parser(node, content))
-}
-
-#[tracing::instrument(skip_all)]
-fn arg_string_literal(node: Node<'_>, _: &[u8]) -> Option<Extracted<String>> {
-    ensure_node_kind!(node, "string_literal");
-    Extracted::new("String", node).pipe(Some)
-}
-
-#[tracing::instrument(skip_all)]
-fn arg_method_invocation(node: Node<'_>, _: &[u8]) -> Option<Extracted<String>> {
-    ensure_node_kind!(node, "method_invocation");
-    Extracted::new("_", node).pipe(Some)
-}
-
-#[tracing::instrument(skip_all)]
-fn arg_integral(node: Node<'_>, content: &[u8]) -> Option<Extracted<String>> {
-    ensure_node_kind!(node, "integral_type");
-    extract(node, content).map(String::from).pipe(Some)
-}
-
-#[tracing::instrument(skip_all)]
-fn arg_spread_param(node: Node<'_>, content: &[u8]) -> Option<Extracted<String>> {
-    ensure_node_kind!(node, "spread_parameter");
-    extract(node, content)
-        .map(|inner| {
-            inner
-                .split_once(' ')
-                .map(|(fst, _)| fst.to_string())
-                .unwrap_or_else(|| inner.to_string())
-        })
-        .pipe(Some)
-}
-
 fn if_kind<'a>(
-    node: Node<'_>,
+    node: TSNode<'_>,
     content: &'a [u8],
     kind: impl AsRef<str>,
 ) -> Option<Extracted<Cow<'a, str>>> {
@@ -327,22 +378,22 @@ fn if_kind<'a>(
 
 /// Traverse children of a node in the syntax tree
 /// until the statement ends (a semicolon is observed).
-fn traverse_statement<'a>(node: Node<'a>, content: &'a [u8]) -> impl Iterator<Item = Node<'a>> {
+fn traverse_statement<'a>(node: TSNode<'a>, content: &'a [u8]) -> impl Iterator<Item = TSNode<'a>> {
     traverse_while(node, content, |node| node.kind() != NODE_KIND_SEMI)
 }
 
 /// Traverse children of a node in the syntax tree
 /// while the predicate returns true.
 fn traverse_while<'a>(
-    node: Node<'a>,
+    node: TSNode<'a>,
     content: &'a [u8],
-    pred: impl FnMut(&Node<'a>) -> bool,
-) -> impl Iterator<Item = Node<'a>> {
+    pred: impl FnMut(&TSNode<'a>) -> bool,
+) -> impl Iterator<Item = TSNode<'a>> {
     traverse(node, content).take_while(pred)
 }
 
 /// Traverse children of a node in the syntax tree.
-fn traverse<'a>(node: Node<'a>, content: &'a [u8]) -> impl Iterator<Item = Node<'a>> {
+fn traverse<'a>(node: TSNode<'a>, content: &'a [u8]) -> impl Iterator<Item = TSNode<'a>> {
     tree_sitter_traversal::traverse(node.walk(), tree_sitter_traversal::Order::Pre)
         .inspect_nodes(content)
 }
@@ -374,20 +425,10 @@ impl<T> Extracted<T> {
     fn is_empty(&self) -> bool {
         self.loc.is_empty()
     }
-
-    /// Map self into an option. If empty, maps to [`None`];
-    /// otherwise maps to [`Some`].
-    fn into_option(self) -> Option<Self> {
-        if self.is_empty() {
-            None
-        } else {
-            Some(self)
-        }
-    }
 }
 
-impl From<Extracted<Kind>> for Symbol<Kind> {
-    fn from(value: Extracted<Kind>) -> Self {
+impl From<Extracted<Node>> for Symbol<Node> {
+    fn from(value: Extracted<Node>) -> Self {
         Self::new(value.inner, value.loc)
     }
 }
@@ -403,162 +444,13 @@ impl std::iter::Sum for Extracted<String> {
                 acc
             }
         })
-        .map(|inner| inner.join(", "))
+        .map(|inner| inner.concat())
     }
 }
 
 #[tracing::instrument(skip_all)]
-fn extract<'a>(node: Node<'_>, content: &'a [u8]) -> Extracted<Cow<'a, str>> {
+fn extract<'a>(node: TSNode<'_>, content: &'a [u8]) -> Extracted<Cow<'a, str>> {
     let loc = node.byte_range().pipe(Location::from);
     let text = loc.extract_from_lossy(content);
     Extracted { inner: text, loc }
-}
-
-/// The label of a generic symbol that is not a method.
-///
-/// This can be thought of as the equivalent to [`Label`],
-/// without the implied necessity of checking for overloads
-/// when resolving.
-#[derive(Clone, Eq, PartialEq, Debug, Hash, derive_more::Display)]
-pub struct Label(String);
-
-impl Label {
-    /// Create a new instance with the provided value.
-    pub fn new(label: impl Into<String>) -> Self {
-        label.into().pipe(Self)
-    }
-}
-
-impl<S: Into<String>> From<S> for Label {
-    fn from(value: S) -> Self {
-        value.into().pipe(Self)
-    }
-}
-
-/// Part of a fully qualified path.
-#[derive(Clone, Eq, PartialEq, Debug, Hash, strum::Display, EnumCommonFields)]
-#[common_field(name: Label)]
-#[strum(serialize_all = "snake_case")]
-pub enum Kind {
-    /// Represents a package name.
-    Package { name: Label },
-
-    /// Represents an import.
-    Import { name: Label },
-
-    /// Represents a class name.
-    Class { name: Label, visibility: Visibility },
-
-    /// Represents a constructor of a class.
-    Constructor { name: Label, visibility: Visibility },
-
-    /// Represents a method on a class.
-    Method { name: Label, visibility: Visibility },
-
-    /// Represents a method invocation.
-    ///
-    /// `target` is the name of the symbol on which the method was invoked;
-    /// this likely needs to be resolved in the current scope
-    /// (for example it is likely a variable or an import).
-    Invocation { name: Label, target: Label },
-
-    /// Represents a variable.
-    Variable {
-        name: Label,
-        type_name: Label,
-        visibility: Visibility,
-    },
-}
-
-impl Kind {
-    /// Create a symbol representing the "default" package.
-    pub fn default_package() -> Self {
-        Self::Package {
-            name: Label::new("default"),
-        }
-    }
-
-    pub fn new_package(name: impl Into<Label>) -> Self {
-        Self::Package { name: name.into() }
-    }
-
-    pub fn new_import(name: impl Into<Label>) -> Self {
-        Self::Import { name: name.into() }
-    }
-
-    pub fn new_class(visibility: Visibility, name: impl Into<Label>) -> Self {
-        Self::Class {
-            name: name.into(),
-            visibility,
-        }
-    }
-
-    pub fn new_constructor(
-        visibility: Visibility,
-        name: impl AsRef<str>,
-        params: impl AsRef<str>,
-    ) -> Self {
-        Self::Constructor {
-            name: format!("{}{}", name.as_ref(), params.as_ref()).into(),
-            visibility,
-        }
-    }
-
-    pub fn new_variable(
-        visibility: Visibility,
-        name: impl Into<Label>,
-        type_name: impl Into<Label>,
-    ) -> Self {
-        Self::Variable {
-            name: name.into(),
-            type_name: type_name.into(),
-            visibility,
-        }
-    }
-
-    pub fn new_method(visibility: Visibility, name: impl Into<Label>) -> Self {
-        Self::Method {
-            name: name.into(),
-            visibility,
-        }
-    }
-
-    pub fn new_invocation(name: impl Into<Label>, target: impl Into<Label>) -> Self {
-        Self::Invocation {
-            name: name.into(),
-            target: target.into(),
-        }
-    }
-}
-
-impl From<&Kind> for Kind {
-    fn from(value: &Kind) -> Self {
-        value.clone()
-    }
-}
-
-/// The visibility for a symbol.
-///
-/// Note that this is not necessarily all the same visibility levels as Java;
-/// mostly we just care "is it public or not", not all the other stuff like
-/// "how visible" or "is it final".
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, strum::Display)]
-#[strum(serialize_all = "snake_case")]
-pub enum Visibility {
-    /// Users outside the package can access this symbol.
-    Public,
-
-    /// The symbol is only accessible within the package.
-    Private,
-}
-
-/// Kinds of scope that can be parsed.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, strum::Display)]
-#[strum(serialize_all = "snake_case")]
-pub enum Scope {
-    /// Denotes a scope entry.
-    Enter(Location),
-
-    /// Denotes a scope exit.
-    Exit(Location),
 }

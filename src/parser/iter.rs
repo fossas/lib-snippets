@@ -4,11 +4,41 @@
 //! The goal isn't to replicate a full combinatorial parser;
 //! just steal some ideas from the concept.
 //!
-//! Longer term I'd like to either convert this to a full blown
-//! combinatorial parser library, or adapt nom/something similar
-//! to work over arbitrary types instead of bytes
-//! (this can be done today but is very complicated,
-//! so I didn't take the time).
+//! # Future work
+//!
+//! ## Wrap around an existing parser combinator
+//!
+//! Nom is adaptable to other data types than bytes,
+//! but it's kind of complicated to do, so I timeboxed it.
+//!
+//! Depending on how complicated our parser needs get,
+//! this may be worth revisiting.
+//!
+//! ## Backtracking (`alternative`)
+//!
+//! Ideal, borderline needed, for parsing true alternative arrangements:
+//! - Optional visibility modifiers (`private foo()` vs `foo()`).
+//! - Optional method targets (`this.foo()` vs `foo()`).
+//!
+//! Without backtracking, the most we can do is invert `some`
+//! to form an "alternative-like" over a single node,
+//! instead of the ideal of an alternative series of parsers.
+//!
+//! Can probably be implemented with `itertools::MultiPeek`
+//! + a wrapper around a `MultiPeek` that translates `next` to `peek`
+//! so that any parser can be turned into a backtracking parser.
+//!
+//! Then if the parse is successful, the `alternative` function
+//! just consumes items from the underlying iterator.
+//!
+//! ## Ownership of input
+//!
+//! Probably needed for backtracking.
+//!
+//! Parsers functions take ownership of the input,
+//! changing their signatures from `Parser<I, T>: Fn(I) -> Option<T>`
+//! to `Parser<I, O, T>: Fn(I) -> (O, Option<T>)`
+//! where `I` is the input and `O` is the unparsed remainder of the input.
 
 /// Describes a generic parser that works with this module.
 pub trait Parser<I, T>: Fn(I) -> Option<T> {}

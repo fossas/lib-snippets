@@ -1,19 +1,88 @@
 use pretty_assertions::assert_eq;
 use snippets::{
-    language::java_11, parser::bytes::Location, Extractor, Kind, Metadata, Method, Snippet,
+    language::java_11::{self, Node},
+    parser::{bytes::Location, stack::Stack, Argument, Parameter, Scope, Symbol, Visibility},
+    Extractor, Kind, Metadata, Method, Snippet,
 };
 
 use crate::include_str_lf;
 
+const PUBLIC: Visibility = Visibility::Public;
+const ANY_PARAM: Parameter = Parameter::Variadic(Argument::Any);
+const ANY_ARG: Argument = Argument::Any;
+
+macro_rules! node {
+    ($loc:expr, $constructor:ident, $($args:expr),* $(,)*) => {
+        Symbol::new(Node::$constructor($($args,)*), $loc).into()
+    };
+}
+
+macro_rules! scope_enter {
+    ($loc:expr) => {
+        Scope::new_enter($loc).into()
+    };
+}
+
+macro_rules! scope_exit {
+    ($loc:expr) => {
+        Scope::new_exit($loc).into()
+    };
+}
+
 #[test]
-fn smoke_call_graph() {
+fn call_graph_smoke_test() {
     crate::tracing::setup();
 
     let options = java_11::EmptyOptions;
-    let content = include_str_lf!("testdata/java_11/smoke_test.java");
+    let content = include_str_lf!("testdata/java_11/with_package.java");
     let extract = java_11::CallGraphExtractor::extract(&options, &content).expect("set up parser");
 
-    let expected: Vec<java_11::CallGraphEntry> = vec![];
+    // Using /**/ to indicate each level of scope and macros to keep it all on one line
+    // so that this is at least somewhat readable...
+    let expected = Stack::<java_11::Node>::from_iter([
+        node!(8..25, new_package, "com.example.MyApp"),
+        node!(35..52, new_import, "java.util.HashMap"),
+        node!(61..85, new_import, "java.util.logging.Logger"),
+        node!(164..176, new_class, PUBLIC, "AppFunctions"),
+        scope_enter!(177..178),
+        /**/ node!(240..253, new_variable, PUBLIC, "logger", "Logger"),
+        /**/ node!(256..303, new_invocation, "getLogger", "Logger", []),
+        /**/ node!(293..302, new_invocation, "getName", "this", []),
+        /**/ node!(344..358, new_constructor, PUBLIC, "AppFunctions", []),
+        /**/ scope_enter!(359..360),
+        /**/ /**/ node!(369..402, new_invocation, "info", "logger", ANY_ARG),
+        /**/ /**/ scope_exit!(408..409),
+        /**/ node!(479..493, new_method, PUBLIC, "simpleMethod", []),
+        /**/ scope_enter!(494..495),
+        /**/ /**/ node!(504..538, new_invocation, "info", "logger", ANY_ARG),
+        /**/ /**/ node!(548..566, new_invocation, "methodWithParam", "this", ANY_ARG),
+        /**/ /**/ scope_exit!(598..599),
+        /**/ node!(667..689, new_method, PUBLIC, "methodWithParam", ANY_PARAM),
+        /**/ scope_enter!(690..691),
+        /**/ /**/ node!(700..758, new_invocation, "info", "logger", ANY_ARG),
+        /**/ /**/ scope_exit!(782..783),
+        /**/ node!(845..874, new_method, PUBLIC, "methodWithParam", ANY_PARAM),
+        /**/ scope_enter!(875..876),
+        /**/ /**/ node!(885..965, new_invocation, "info", "logger", ANY_ARG),
+        /**/ /**/ node!(975..989, new_invocation, "staticMethod", "this", []),
+        /**/ /**/ scope_exit!(1044..1045),
+        /**/ node!(1095..1105, new_class, PUBLIC, "InnerClass"),
+        /**/ scope_enter!(1106..1107),
+        /**/ /**/ node!(1123..1135, new_constructor, PUBLIC, "InnerClass", []),
+        /**/ /**/ scope_enter!(1136..1137),
+        /**/ /**/ /**/ node!(1150..1194, new_invocation, "info", "logger", ANY_ARG),
+        /**/ /**/ /**/ scope_exit!(1204..1205),
+        /**/ /**/ scope_exit!(1210..1211),
+        /**/ node!(1275..1291, new_class, PUBLIC, "StaticInnerClass"),
+        /**/ scope_enter!(1292..1293),
+        /**/ /**/ node!(1309..1327, new_constructor, PUBLIC, "StaticInnerClass", []),
+        /**/ /**/ scope_enter!(1328..1329),
+        /**/ /**/ /**/ node!(1342..1392, new_invocation, "info", "logger", ANY_ARG),
+        /**/ /**/ /**/ scope_exit!(1402..1403),
+        /**/ /**/ scope_exit!(1408..1409),
+        /**/ scope_exit!(1410..1411),
+    ]);
+
     assert_eq!(expected, extract);
 }
 
@@ -74,6 +143,32 @@ fn smoke_test() {
             "public StaticInnerClass() {\n            logger.info(\"StaticInnerClass constructor called\");\n        }".as_bytes(),
         ),
     ];
+
+    assert_eq!(expected, extract);
+}
+
+#[test]
+fn call_graph_hello_world() {
+    crate::tracing::setup();
+
+    let options = java_11::EmptyOptions;
+    let content = include_str_lf!("testdata/java_11/hello_world.java");
+    let extract = java_11::CallGraphExtractor::extract(&options, &content).expect("set up parser");
+
+    const PUBLIC: Visibility = Visibility::Public;
+    const ANY: Parameter = Parameter::Variadic(Argument::Any);
+
+    // Using /**/ to indicate each level of scope and macros to keep it all on one line
+    // so that this is at least somewhat readable...
+    let expected = Stack::<java_11::Node>::from_iter([
+        node!(7..17, new_class, PUBLIC, "HelloWorld"),
+        scope_enter!(18..19),
+        /**/ node!(43..62, new_method, PUBLIC, "main", ANY),
+        /**/ scope_enter!(63..64),
+        /**/ /**/ node!(73..108, new_invocation, "println", "System.out", ANY_ARG),
+        /**/ /**/ scope_exit!(114..115),
+        /**/ scope_exit!(116..117),
+    ]);
 
     assert_eq!(expected, extract);
 }

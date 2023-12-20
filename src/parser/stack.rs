@@ -1,9 +1,14 @@
+use std::{borrow::Cow, ops::Range};
+
+use bstr::ByteSlice;
+use colored::Colorize;
 use delegate::delegate;
-use getset::{CopyGetters, Getters};
 use tap::Pipe;
 use tracing::trace;
 
-use crate::parser::bytes::Location;
+use crate::parser::{bytes::Location, Symbol, UnitSymbol};
+
+use super::Scope;
 
 /// A stack models the types in a given source code file.
 ///
@@ -104,12 +109,24 @@ use crate::parser::bytes::Location;
 ///     return "";
 ///   }
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Stack<T: PartialEq> {
+#[derive(Debug, Clone)]
+pub struct Stack<T: Node> {
     entries: Vec<Entry<T>>,
     scope_enters: usize,
     scope_exits: usize,
 }
+
+impl<T: Node> PartialEq for Stack<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.entries == other.entries
+    }
+}
+
+impl<T: Node> Eq for Stack<T> {}
+
+/// All stack nodes must comply with this trait to facilitate operation & debugging.
+pub trait Node: PartialEq + std::fmt::Debug {}
+impl<T: PartialEq + std::fmt::Debug> Node for T {}
 
 macro_rules! scope_indent {
     ($stack:ident => $($arg:tt)*) => {{
@@ -118,7 +135,7 @@ macro_rules! scope_indent {
     }};
 }
 
-impl<T: PartialEq> Stack<T> {
+impl<T: Node> Stack<T> {
     /// Enter a new scope on the stack.
     pub fn enter(&mut self, location: impl Into<Location>) {
         let loc = location.into();
@@ -157,6 +174,7 @@ impl<T: PartialEq> Stack<T> {
 
     /// Retrace the stack, reporting all the symbols in scope.
     /// Symbols are reported in the inverse order that they are added to the stack.
+    #[tracing::instrument(skip_all)]
     pub fn retrace(&self) -> impl Iterator<Item = &Symbol<T>> {
         self.entries.iter().rev().pipe(ScopedStackIterator::new)
     }
@@ -167,6 +185,7 @@ impl<T: PartialEq> Stack<T> {
     /// Symbols are reported in the inverse order that they are added to the stack.
     ///
     /// If the given symbol is not found in the stack, the returned vector is empty.
+    #[tracing::instrument(skip_all)]
     pub fn retrace_from<'a, 'b: 'a>(
         &'a self,
         symbol: &'b Symbol<T>,
@@ -175,7 +194,57 @@ impl<T: PartialEq> Stack<T> {
             .iter()
             .rev()
             .skip_while(move |entry| entry != symbol)
+            .skip(1)
             .pipe(ScopedStackIterator::new)
+    }
+
+    /// Iterate through the symbols in the stack.
+    #[tracing::instrument(skip_all)]
+    pub fn symbols(&self) -> impl Iterator<Item = &Symbol<T>> {
+        self.entries.iter().filter_map(|entry| match entry {
+            Entry::Symbol(sy) => Some(sy),
+            _ => None,
+        })
+    }
+
+    /// Returns a formatted string representing the input,
+    /// where the search symbol and its scope are highlighted.
+    ///
+    /// - Italic text is the actual symbol for which scope is being reported.
+    /// - Dimmed text in the string is not part of the current scope.
+    ///   It may be out of scope, or may not have been parsed at all.
+    /// - Normal text in the string is part of the current scope.
+    #[tracing::instrument(skip_all)]
+    pub fn render_scope(&self, content: &[u8], search: &Symbol<T>) -> String {
+        content
+            .grapheme_indices()
+            .map(|(start, end, chunk)| {
+                // The end index provided is exclusive, but `Location` assumes
+                // inclusive end index.
+                (start..end.saturating_sub(1), chunk)
+            })
+            .map(|(location, chunk)| {
+                if search.location.encloses_range(&location) {
+                    Cow::Owned(chunk.italic().to_string())
+                } else if self.in_context_from(search, &location) {
+                    Cow::Borrowed(chunk)
+                } else {
+                    Cow::Owned(chunk.dimmed().to_string())
+                }
+            })
+            .collect()
+    }
+
+    /// Report whether a given byte range is in the context of the parsed stack,
+    /// starting from the provided search node.
+    #[tracing::instrument(skip_all)]
+    fn in_context_from(&self, symbol: &Symbol<T>, search: &Range<usize>) -> bool {
+        // No attempt being made to build a more efficient index
+        // because premature optimization.
+        // If this becomes a problem, consider using an interval tree
+        // or some similar structure.
+        self.retrace_from(symbol)
+            .any(|entry| entry.location().encloses_range(search))
     }
 
     fn scope_level(&self) -> usize {
@@ -192,7 +261,24 @@ impl<T: PartialEq> Stack<T> {
 
             /// Get the last entry in the stack.
             pub fn last(&self) -> Option<&Entry<T>>;
+
+            /// Check whether the stack is empty.
+            pub fn is_empty(&self) -> bool;
         }
+    }
+}
+
+impl<T: Node> FromIterator<Entry<T>> for Stack<T> {
+    fn from_iter<I: IntoIterator<Item = Entry<T>>>(iter: I) -> Self {
+        let mut stack = Self::default();
+        for entry in iter {
+            match entry {
+                Entry::Enter(entry) => stack.enter(entry.location),
+                Entry::Exit(entry) => stack.exit(entry.location),
+                Entry::Symbol(sy) => stack.push(sy),
+            }
+        }
+        stack
     }
 }
 
@@ -200,79 +286,13 @@ impl<T: PartialEq> Stack<T> {
 /// generates code that for some reason requires `T` to implement
 /// `Default`, even though this doesn't generate a default
 /// value of `T` (just a default `Vec<T>` that holds it).
-impl<T: PartialEq> Default for Stack<T> {
+impl<T: Node> Default for Stack<T> {
     fn default() -> Self {
         Self {
             entries: Default::default(),
             scope_enters: Default::default(),
             scope_exits: Default::default(),
         }
-    }
-}
-
-/// A symbol in the source code.
-///
-/// Different languages may have additional
-/// data they track about the symbol;
-/// at its base level this is just a location in the source code.
-///
-/// Language implementations can customize the generic type
-/// to replace the included metadata as appropriate.
-///
-/// Regardless of additional information provided,
-/// the stack solely uses the source code location for equality.
-#[derive(Clone, PartialEq, Eq, Hash, Getters, CopyGetters)]
-pub struct Symbol<T: PartialEq> {
-    /// The inner type of the symbol.
-    /// This may be specific to the language being parsed.
-    #[getset(get = "pub")]
-    inner: T,
-
-    /// The location of the symbol in source code.
-    #[getset(get_copy = "pub")]
-    location: Location,
-}
-
-impl<T: PartialEq> Symbol<T> {
-    /// Construct a new instance with the specified inner type and location.
-    pub fn new(inner: impl Into<T>, location: impl Into<Location>) -> Self {
-        Self {
-            inner: inner.into(),
-            location: location.into(),
-        }
-    }
-}
-
-impl<T: Clone + PartialEq> From<&Symbol<T>> for Symbol<T> {
-    fn from(value: &Symbol<T>) -> Self {
-        value.clone()
-    }
-}
-
-impl<T: PartialEq> std::fmt::Debug for Symbol<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self.location.as_range())
-    }
-}
-
-impl<T: PartialEq> Symbol<T> {
-    /// The byte length of the symbol.
-    pub fn len(&self) -> usize {
-        self.location.byte_len().as_usize()
-    }
-
-    /// Whether the symbol is empty.
-    pub fn is_empty(&self) -> bool {
-        self.location.is_empty()
-    }
-}
-
-/// A [`Symbol`] that has no metadata attached to it, only a location.
-type UnitSymbol = Symbol<()>;
-
-impl<T: Into<Location>> From<T> for UnitSymbol {
-    fn from(value: T) -> Self {
-        Symbol::new((), value)
     }
 }
 
@@ -287,7 +307,7 @@ impl<T: Into<Location>> From<T> for UnitSymbol {
 /// Some types (such as [`Symbol`]) already include location
 /// and are therefore inherently able to disambuguate entries.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Entry<T: PartialEq> {
+pub enum Entry<T: Node> {
     /// Indicates that a scope has been entered.
     Enter(UnitSymbol),
 
@@ -298,7 +318,7 @@ pub enum Entry<T: PartialEq> {
     Symbol(Symbol<T>),
 }
 
-impl<T: PartialEq> Entry<T> {
+impl<T: Node> Entry<T> {
     /// The location of the entry in the source code, regardless of variant.
     pub fn location(&self) -> Location {
         match self {
@@ -309,11 +329,26 @@ impl<T: PartialEq> Entry<T> {
     }
 }
 
-impl<T: PartialEq> PartialEq<Symbol<T>> for &Entry<T> {
+impl<T: Node> PartialEq<Symbol<T>> for &Entry<T> {
     fn eq(&self, other: &Symbol<T>) -> bool {
         match self {
             Entry::Symbol(symbol) => symbol == other,
             _ => false,
+        }
+    }
+}
+
+impl<T: Node> From<Symbol<T>> for Entry<T> {
+    fn from(value: Symbol<T>) -> Self {
+        Self::Symbol(value)
+    }
+}
+
+impl<T: Node> From<Scope> for Entry<T> {
+    fn from(value: Scope) -> Self {
+        match value {
+            Scope::Enter(loc) => Symbol::new((), loc).pipe(Self::Enter),
+            Scope::Exit(loc) => Symbol::new((), loc).pipe(Self::Exit),
         }
     }
 }
@@ -338,7 +373,7 @@ impl<I> ScopedStackIterator<I> {
 impl<'a, T, I> Iterator for ScopedStackIterator<I>
 where
     Self: 'a,
-    T: 'a + PartialEq,
+    T: 'a + Node,
     I: Iterator<Item = &'a Entry<T>>,
 {
     type Item = &'a Symbol<T>;

@@ -1,7 +1,7 @@
 use itertools::Itertools;
 use pretty_assertions::assert_eq;
 
-use snippets::parser::{bytes::Location, stack::*};
+use snippets::parser::{bytes::Location, stack::*, Symbol};
 
 /// Given some text, return a new location
 /// for that text that models it appearing
@@ -53,10 +53,10 @@ macro_rules! mk_symbol {
 
 /// Assert the scope of the provided symbol.
 macro_rules! assert_scope {
-    ($stack:ident => $($scope:expr,)*) => {
+    ($stack:ident => $($scope:expr),* $(,)*) => {
         assert_eq!($stack.retrace().collect_vec(), vec![$($scope,)*])
     };
-    ($stack:ident, $symbol:expr => $($scope:expr,)*) => {
+    ($stack:ident, $symbol:expr => $($scope:expr),* $(,)*) => {
         assert_eq!($stack.retrace_from($symbol).collect_vec(), vec![$($scope,)*])
     };
 }
@@ -188,4 +188,41 @@ fn smoke_scope() {
         &some_class,
         &package,
     );
+}
+
+#[test]
+fn retrace_from() {
+    crate::tracing::setup();
+    let mut stack = Stack::default();
+
+    // Set the package at the base level.
+    // Note that it doesn't get a scope!
+    let package = mk_symbol!(stack => "com.example.myapp");
+    stack_push!(stack => &package);
+
+    // Now we've come across the declaration for `SomeClass`...
+    let some_class = mk_symbol!(stack => "SomeClass");
+    stack_push!(stack => &some_class);
+    stack_push!(stack => enter_scope);
+    stack_push!(stack => exit_scope);
+
+    // And a sibling of it, `OtherClass`...
+    let other_class = mk_symbol!(stack => "OtherClass");
+    stack_push!(stack => &other_class);
+    stack_push!(stack => enter_scope);
+    stack_push!(stack => exit_scope);
+
+    // Make sure the scope is set up as intended:
+    assert_scope!(
+        stack =>
+        &other_class,
+        &some_class,
+        &package,
+    );
+
+    // Now, if we search for a symbol in the stack
+    // and retrace the scope from there, ensure:
+    // - It doesn't report things below it in the stack.
+    // - It doesn't report itself.
+    assert_scope!(stack, &some_class => &package);
 }

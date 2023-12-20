@@ -137,6 +137,19 @@ impl Location {
         let bytes = self.extract_from(buf);
         String::from_utf8_lossy(bytes)
     }
+
+    /// Report whether the provided location is enclosed within self.
+    pub fn encloses(self, other: Self) -> bool {
+        let other = other.as_range();
+        let bounds = self.as_range();
+        bounds.contains(&other.start) && bounds.contains(&other.end)
+    }
+
+    /// Report whether the provided range is enclosed within self.
+    pub fn encloses_range(self, other: &Range<usize>) -> bool {
+        let bounds = self.as_range();
+        bounds.contains(&other.start) && bounds.contains(&other.end)
+    }
 }
 
 impl From<Range<usize>> for Location {
