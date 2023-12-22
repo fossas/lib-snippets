@@ -13,15 +13,17 @@
 
 use tap::{Pipe, Tap};
 use tracing::{debug, warn};
-use tree_sitter::Node;
 use tree_sitter_traversal::{traverse_tree, Order};
 
 use crate::{
     content::Content,
-    debugging::{inspect_node, ToDisplayEscaped},
+    debugging::{inspect_node, NodeInspector, ToDisplayEscaped},
     impl_language,
     impl_prelude::*,
-    parser::{NODE_KIND_CONSTRUCTOR_DECL, NODE_KIND_METHOD_DECL},
+    parser::{
+        java, stack::Stack, Argument, Arguments, Label, Parameter, Parameters, Scope, Visibility,
+        NODE_KIND_CONSTRUCTOR_DECL, NODE_KIND_METHOD_DECL,
+    },
 };
 
 /// This module implements support for Java 11.
@@ -37,27 +39,22 @@ impl SnippetLanguage for Language {
 
 impl_language!(Language);
 
-/// This type is a Java-specific replacement for [`SnippetOptions`],
-/// since the Java extractor does not support the full set of options.
+/// An empty struct used when no options are accepted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmptyOptions;
+
+/// Extracts standard snippets from source code.
 ///
 /// All targets extracted are extracted with the equivalent of
-/// [`SnippetTarget::Function`], [`SnippetKind::Full`], and [`SnippetMethod::Raw`]
-/// inside [`SnippetOptions`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Options;
-
-/// Supports extracting snippets from source code.
+/// [`SnippetTarget::Function`], [`SnippetKind::Full`], and [`SnippetMethod::Raw`].
 pub struct Extractor;
 
 impl SnippetExtractor for Extractor {
-    type Language = Language;
-    type Options = Options;
+    type Options = EmptyOptions;
+    type Output = Vec<Snippet<Language>>;
 
     #[tracing::instrument(skip_all, fields(content_len = content.as_bytes().len()))]
-    fn extract(
-        _opts: &Self::Options,
-        content: &Content,
-    ) -> Result<Vec<Snippet<Self::Language>>, ExtractorError> {
+    fn extract(_: &Self::Options, content: &Content) -> Result<Self::Output, Error> {
         let mut parser = parser()?;
 
         let content = content.as_bytes();
@@ -97,9 +94,9 @@ impl SnippetExtractor for Extractor {
 #[tracing::instrument(skip_all)]
 fn extract_function<L>(
     loc: SnippetLocation,
-    node: Node<'_>,
+    node: tree_sitter::Node<'_>,
     content: &[u8],
-) -> Result<Snippet<L>, ExtractorError> {
+) -> Result<Snippet<L>, Error> {
     // The raw content here is just extracted for debugging.
     let raw = loc.extract_from(content);
     debug!(raw = %raw.display_escaped());
@@ -127,11 +124,187 @@ fn extract_function<L>(
         .pipe(Ok)
 }
 
+/// Extracts function call graphs from source code.
+pub struct CallGraphExtractor;
+
+impl SnippetExtractor for CallGraphExtractor {
+    type Options = EmptyOptions;
+    type Output = Stack<Node>;
+
+    #[tracing::instrument(skip_all)]
+    fn extract(_: &Self::Options, content: &Content) -> Result<Self::Output, Error> {
+        let mut parser = parser()?;
+
+        let content = content.as_bytes();
+        let Some(tree) = parser.parse(content, None) else {
+            warn!("provided content did not parse to a tree");
+            return Stack::default().pipe(Ok);
+        };
+
+        // As the content is parsed, it can't be collapsed
+        // into something simple like a lookup table;
+        // this is because Java is a scoped language so the same
+        // name may indicate multiple symbol paths at different scopes.
+        //
+        // Instead, this parser builds a stack of symbols,
+        // performing a naive search of the entire stack (from front to back)
+        // to resolve names into their fully qualified symbols.
+        //
+        // Symbols that are not found in the stack are assumed syntactically correct,
+        // and that they are declared in a different file in the same package.
+        //
+        // Note that this is not a generalized parser for Java;
+        // it is specific to _methods_ and therefore only stores
+        // symbols that are required for resolving methods to their
+        // declarations. As a concrete example, this parser ignores enums,
+        // because they are not relevant for looking up methods.
+        let mut stack = Stack::default();
+
+        // Build the stack. Reporting the call graph is a two-phase operation
+        // becuase each given symbol may depend on things that come
+        // later in the file.
+        for node in traverse_tree(&tree, Order::Pre).inspect_nodes(content) {
+            if let Some(scope) = java::scope(node, content) {
+                match scope {
+                    Scope::Enter(location) => stack.enter(location),
+                    Scope::Exit(location) => stack.exit(location),
+                }
+                continue;
+            }
+
+            if let Some(symbol) = java::symbol(node, content) {
+                stack.push(symbol);
+                continue;
+            }
+        }
+
+        Ok(stack)
+    }
+}
+
+/// A node in the file syntax tree.
+#[derive(Clone, Eq, PartialEq, Debug, Hash, strum::Display)]
+#[strum(serialize_all = "snake_case")]
+#[non_exhaustive]
+pub enum Node {
+    /// Represents a package name.
+    Package { name: Label },
+
+    /// Represents an import.
+    Import { name: Label },
+
+    /// Represents a class name.
+    Class { name: Label, visibility: Visibility },
+
+    /// Represents a constructor of a class.
+    Constructor {
+        name: Label,
+        params: Parameters,
+        visibility: Visibility,
+    },
+
+    /// Represents a method on a class.
+    Method {
+        name: Label,
+        params: Parameters,
+        visibility: Visibility,
+    },
+
+    /// Represents a method invocation.
+    ///
+    /// `target` is the name of the symbol on which the method was invoked;
+    /// this likely needs to be resolved in the current scope
+    /// (for example it is likely a variable or an import).
+    Invocation {
+        name: Label,
+        args: Arguments,
+        target: Label,
+    },
+
+    /// Represents a variable.
+    Variable {
+        name: Label,
+        type_name: Label,
+        visibility: Visibility,
+    },
+}
+
+impl Node {
+    pub fn new_package(name: impl Into<Label>) -> Self {
+        Self::Package { name: name.into() }
+    }
+
+    pub fn new_import(name: impl Into<Label>) -> Self {
+        Self::Import { name: name.into() }
+    }
+
+    pub fn new_class(visibility: Visibility, name: impl Into<Label>) -> Self {
+        Self::Class {
+            name: name.into(),
+            visibility,
+        }
+    }
+
+    pub fn new_constructor(
+        visibility: Visibility,
+        name: impl Into<Label>,
+        params: impl IntoIterator<Item = Parameter>,
+    ) -> Self {
+        Self::Constructor {
+            name: name.into(),
+            params: Parameters::new(params),
+            visibility,
+        }
+    }
+
+    pub fn new_variable(
+        visibility: Visibility,
+        name: impl Into<Label>,
+        type_name: impl Into<Label>,
+    ) -> Self {
+        Self::Variable {
+            name: name.into(),
+            type_name: type_name.into(),
+            visibility,
+        }
+    }
+
+    pub fn new_method(
+        visibility: Visibility,
+        name: impl Into<Label>,
+        params: impl IntoIterator<Item = Parameter>,
+    ) -> Self {
+        Self::Method {
+            name: name.into(),
+            params: Parameters::new(params),
+            visibility,
+        }
+    }
+
+    pub fn new_invocation(
+        name: impl Into<Label>,
+        target: impl Into<Label>,
+        args: impl IntoIterator<Item = Argument>,
+    ) -> Self {
+        Self::Invocation {
+            name: name.into(),
+            target: target.into(),
+            args: Arguments::new(args),
+        }
+    }
+}
+
+impl From<&Node> for Node {
+    fn from(value: &Node) -> Self {
+        value.clone()
+    }
+}
+
 #[tracing::instrument]
-pub(crate) fn parser() -> Result<tree_sitter::Parser, ExtractorError> {
+pub(crate) fn parser() -> Result<tree_sitter::Parser, Error> {
     let mut parser = tree_sitter::Parser::new();
     parser
         .set_language(tree_sitter_java::language())
-        .map_err(ExtractorError::configure)?;
+        .map_err(Error::configure)?;
     Ok(parser)
 }

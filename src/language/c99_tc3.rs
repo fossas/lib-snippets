@@ -59,14 +59,18 @@ pub struct Extractor;
 // If you make changes to this extractor, consider if they should also be made to the cpp_98 extractor
 // or if the functionality makes sense to be shared.
 impl SnippetExtractor for Extractor {
-    type Language = Language;
     type Options = SnippetOptions;
+    type Output = Vec<Snippet<Language>>;
 
-    #[tracing::instrument(skip_all, fields(kinds = %opts.kinds(), methods = %opts.methods(), content_len = content.as_bytes().len()))]
-    fn extract(
-        opts: &SnippetOptions,
-        content: &Content,
-    ) -> Result<Vec<Snippet<Self::Language>>, ExtractorError> {
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            kinds = %opts.kinds(),
+            methods = %opts.methods(),
+            content_len = content.as_bytes().len(),
+        )
+    )]
+    fn extract(opts: &Self::Options, content: &Content) -> Result<Self::Output, Error> {
         let mut parser = init_parser()?;
 
         let content = content.as_bytes();
@@ -106,7 +110,7 @@ fn extract<L>(
     meta: SnippetMetadata,
     node: Node<'_>,
     content: &[u8],
-) -> Option<Result<Snippet<L>, ExtractorError>> {
+) -> Option<Result<Snippet<L>, Error>> {
     match target {
         SnippetTarget::Function => extract_function(meta, node, content),
     }
@@ -117,7 +121,7 @@ fn extract_function<L>(
     meta: SnippetMetadata,
     node: Node<'_>,
     content: &[u8],
-) -> Option<Result<Snippet<L>, ExtractorError>> {
+) -> Option<Result<Snippet<L>, Error>> {
     // The raw content here is just extracted for debugging.
     let raw = meta.location().extract_from(content);
     debug!(raw = %raw.display_escaped());
@@ -270,11 +274,11 @@ fn matches_target(target: SnippetTarget, node: Node<'_>) -> bool {
 }
 
 #[tracing::instrument]
-pub(crate) fn init_parser() -> Result<tree_sitter::Parser, ExtractorError> {
+pub(crate) fn init_parser() -> Result<tree_sitter::Parser, Error> {
     let mut parser = tree_sitter::Parser::new();
     parser
         .set_language(tree_sitter_c::language())
-        .map_err(ExtractorError::configure)?;
+        .map_err(Error::configure)?;
     Ok(parser)
 }
 

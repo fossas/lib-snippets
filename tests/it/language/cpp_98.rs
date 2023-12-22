@@ -1,6 +1,6 @@
 use snippets::{
-    language::cpp_98, Extractor, Kind, Kinds, Location, Metadata, Options, Snippet, Target,
-    Targets, Transform, Transforms,
+    language::cpp_98, parser::bytes::Location, Extractor, Kind, Kinds, Metadata, Options, Snippet,
+    Target, Targets, Transform, Transforms,
 };
 
 use crate::include_str_lf;

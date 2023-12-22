@@ -1,8 +1,8 @@
 use itertools::Itertools;
 use pretty_assertions::assert_eq;
 use snippets::{
-    content::Content, language::c99_tc3, Extractor, Kind, Kinds, Location, Metadata, Method,
-    Options, Snippet, Target, Targets, Transform, Transforms,
+    content::Content, language::c99_tc3, parser::bytes::Location, Extractor, Kind, Kinds, Metadata,
+    Method, Options, Snippet, Target, Targets, Transform, Transforms,
 };
 use tap::Pipe;
 

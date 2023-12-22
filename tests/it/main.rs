@@ -13,6 +13,8 @@
 //!
 /// [filtering events with environment variables]: https://docs.rs/tracing-subscriber/latest/tracing_subscriber/fmt/index.html#filtering-events-with-environment-variables
 pub mod language;
+pub mod parser;
+
 mod tracing;
 
 /// Include the contents of the file at the provided path, normalizing `\r\n` to `\n`.
