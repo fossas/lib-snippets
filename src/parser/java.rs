@@ -45,6 +45,15 @@ type Parser<T> = fn(TSNode<'_>, &[u8]) -> Option<T>;
 /// Wrap a [`Parser`] with the provided `content` so that it fits the shape
 /// expected by [`crate::parser::iter`] (which expects a function that
 /// accepts a single argument).
+///
+/// Usage:
+/// ```ignore
+/// fn package(node: TSNode<'_>, content: &[u8]) -> Option<Symbol<Node>> {
+///     let mut ctx = traverse_statement(node, content);
+///     let name = some(&mut ctx, parser!(content, if_kind, "scoped_identifier"))?;
+///     symbol!(Node::new_package(name.inner), name.loc)
+/// }
+/// ```
 macro_rules! parser {
     ($content:expr, $parser:expr) => {
         |node: TSNode<'_>| $parser(node, $content)
@@ -54,19 +63,33 @@ macro_rules! parser {
     };
 }
 
-/// Use [`crate::parser::iter::some`] on the context,
-/// early returning [`None`] from the enclosing function if no parse
-/// is successful.
+/// Convenience wrapper around [`crate::parser::iter::some`] and [`parser!`].
+/// Runs the provided parser on the context, wrapping the content.
+///
+/// Usage:
+/// ```ignore
+/// fn package(node: TSNode<'_>, content: &[u8]) -> Option<Symbol<Node>> {
+///     let mut ctx = traverse_statement(node, content);
+///     let name = parse_some!(ctx => content, if_kind, "scoped_identifier")?;
+///     symbol!(Node::new_package(name.inner), name.loc)
+/// }
+/// ```
 macro_rules! parse_some {
     ($context:ident => $($tail:tt)*) => {
-        match crate::parser::iter::some(&mut $context, parser!($($tail)*)) {
-            Some(result) => result,
-            None => return None,
-        }
+        crate::parser::iter::some(&mut $context, parser!($($tail)*))
     };
 }
 
 /// Construct a new [`Symbol`], trace it in context, and wrap it in [`Some`].
+///
+/// Usage:
+/// ```ignore
+/// fn package(node: TSNode<'_>, content: &[u8]) -> Option<Symbol<Node>> {
+///     let mut ctx = traverse_statement(node, content);
+///     let name = parse_some!(ctx => content, if_kind, "scoped_identifier")?;
+///     symbol!(Node::new_package(name.inner), name.loc)
+/// }
+/// ```
 macro_rules! symbol {
     ($($args:expr),* $(,)*) => {
         Symbol::new($($args,)*).tap(|k| trace!(loc = %k.location(), kind = ?k.inner())).pipe(Some)
@@ -154,7 +177,7 @@ fn package(node: TSNode<'_>, content: &[u8]) -> Option<Symbol<Node>> {
     ensure_node_kind!(node, "package_declaration");
 
     let mut ctx = traverse_statement(node, content);
-    let name = parse_some!(ctx => content, if_kind, "scoped_identifier");
+    let name = parse_some!(ctx => content, if_kind, "scoped_identifier")?;
 
     symbol!(Node::new_package(name.inner), name.loc)
 }
@@ -164,7 +187,7 @@ fn import(node: TSNode<'_>, content: &[u8]) -> Option<Symbol<Node>> {
     ensure_node_kind!(node, "import_declaration");
 
     let mut ctx = traverse_statement(node, content);
-    let name = parse_some!(ctx => content, if_kind, "scoped_identifier");
+    let name = parse_some!(ctx => content, if_kind, "scoped_identifier")?;
     symbol!(Node::new_import(name.inner), name.loc)
 }
 
@@ -179,7 +202,7 @@ fn class(node: TSNode<'_>, content: &[u8]) -> Option<Symbol<Node>> {
     let visibility = Visibility::Public;
 
     let mut ctx = traverse_while(node, content, |node| node.kind() != "class_body");
-    let name = parse_some!(ctx => content, if_kind, "identifier");
+    let name = parse_some!(ctx => content, if_kind, "identifier")?;
 
     symbol!(Node::new_class(visibility, name.inner), name.loc,)
 }
@@ -195,8 +218,8 @@ fn constructor(node: TSNode<'_>, content: &[u8]) -> Option<Symbol<Node>> {
     let visibility = Visibility::Public;
 
     let mut ctx = traverse_while(node, content, |node| node.kind() != "constructor_body");
-    let name = parse_some!(ctx => content, if_kind, "identifier");
-    let args = parse_some!(ctx => content, method_params);
+    let name = parse_some!(ctx => content, if_kind, "identifier")?;
+    let args = parse_some!(ctx => content, method_params)?;
 
     symbol!(
         Node::new_constructor(visibility, name.inner, args.inner),
@@ -215,8 +238,8 @@ fn field(node: TSNode<'_>, content: &[u8]) -> Option<Symbol<Node>> {
     let visibility = Visibility::Public;
 
     let mut ctx = traverse_statement(node, content);
-    let type_name = parse_some!(ctx => content, if_kind, "type_identifier");
-    let name = parse_some!(ctx => content, if_kind, "identifier");
+    let type_name = parse_some!(ctx => content, if_kind, "type_identifier")?;
+    let name = parse_some!(ctx => content, if_kind, "identifier")?;
 
     symbol!(
         Node::new_variable(visibility, name.inner, type_name.inner),
@@ -235,8 +258,8 @@ fn method(node: TSNode<'_>, content: &[u8]) -> Option<Symbol<Node>> {
     let visibility = Visibility::Public;
 
     let mut ctx = traverse_while(node, content, |node| node.kind() != "block");
-    let name = parse_some!(ctx => content, if_kind, "identifier");
-    let args = parse_some!(ctx => content, method_params);
+    let name = parse_some!(ctx => content, if_kind, "identifier")?;
+    let args = parse_some!(ctx => content, method_params)?;
 
     symbol!(
         Node::new_method(visibility, name.inner, args.inner),
@@ -254,14 +277,14 @@ fn invocation(node: TSNode<'_>, content: &[u8]) -> Option<Symbol<Node>> {
     let mut ctx = traverse_statement(node, content).peekable();
     let mut target = Vec::new();
     let name = loop {
-        let name_or_target = parse_some!(ctx => content, if_kind, "identifier");
+        let name_or_target = parse_some!(ctx => content, if_kind, "identifier")?;
         if ctx.peek().map(|n| n.kind()) == Some(".") {
             target.push(name_or_target);
         } else {
             break name_or_target;
         }
     };
-    let args = parse_some!(ctx => content, invocation_arguments);
+    let args = parse_some!(ctx => content, invocation_arguments)?;
 
     let target = if target.is_empty() {
         Extracted::new("this", name.loc)

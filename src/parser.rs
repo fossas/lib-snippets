@@ -86,7 +86,7 @@ impl std::fmt::Debug for Label {
 #[strum(serialize_all = "snake_case")]
 #[non_exhaustive]
 pub enum Visibility {
-    /// Users outside the package can access this symbol.
+    /// The symbol is accessible from outside the package.
     Public,
 
     /// The symbol is only accessible within the package.
