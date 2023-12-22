@@ -19,7 +19,20 @@ Name           | Description                                          | Kind
 `lang-cpp`     | Enables support for C++ 98.                          | Language
 `sha2-asm`     | Enables hardware acceleration for SHA2               | Performance
 
-# History
+# Compatibility
 
-This repository initially existed in FOSSA's [foundation-libs](https://github.com/fossas/foundation-libs/tree/master/snippets) monorepo.
-History for this library earlier than v0.1.3 can be viewed there.
+FOSSA generally targets the latest releases of Rust, so there is no MSRV policy.
+Releases will generally use the latest Rust features.
+
+If this becomes a problem, open an issue and we can talk it out!
+
+# Developing
+
+## Release process
+
+- [Check semver compatibility](https://crates.io/crates/cargo-semver-checks) to choose the version to be released.
+  - For example, on the feature branch you can run `cargo semver-checks --baseline-rev main`.
+- Run `cargo doc --open` to validate the public API appears as you expect.
+  - Note that this will show docs for dependency crates as well; just look at the `snippets` crate.
+- Update changelog and merge the branch to `main`.
+- Release the version by tagging it. [`cargo-release`](https://crates.io/crates/cargo-release) is recommended.

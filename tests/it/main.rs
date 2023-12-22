@@ -13,12 +13,15 @@
 //!
 /// [filtering events with environment variables]: https://docs.rs/tracing-subscriber/latest/tracing_subscriber/fmt/index.html#filtering-events-with-environment-variables
 pub mod language;
+pub mod parser;
+
 mod tracing;
 
 /// Include the contents of the file at the provided path, normalizing `\r\n` to `\n`.
 #[macro_export]
 macro_rules! include_str_lf {
-    ($path:expr) => {
-        include_str!($path).replace("\r\n", "\n")
-    };
+    ($path:expr) => {{
+        let content = include_str!($path).replace("\r\n", "\n");
+        snippets::content::Content::from(content)
+    }};
 }

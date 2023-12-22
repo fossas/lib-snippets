@@ -42,14 +42,10 @@ use tracing::{debug, warn};
 use tree_sitter::Node;
 use tree_sitter_traversal::{traverse, traverse_tree, Order};
 
-use crate::debugging::ToDisplayEscaped;
-use crate::text::normalize_space;
-use crate::tree_sitter_consts::{NODE_KIND_FUNC_DEF, NODE_KIND_OPEN_BRACE};
+use crate::content::Content;
+use crate::debugging::{inspect_node, ToDisplayEscaped};
+use crate::parser::{normalize, NODE_KIND_FUNC_DEF, NODE_KIND_OPEN_BRACE};
 use crate::{impl_language, impl_prelude::*};
-
-use super::normalize_code::normalize_code;
-use super::normalize_comments::normalize_comments;
-use super::snippet_context::SnippetContext;
 
 /// This module implements support for CPP 98.
 ///
@@ -71,15 +67,21 @@ pub struct Extractor;
 // If you make changes to this extractor, consider if they should also be made to the c99_tc3 extractor
 // or if the functionality makes sense to be shared.
 impl SnippetExtractor for Extractor {
-    type Language = Language;
+    type Options = SnippetOptions;
+    type Output = Vec<Snippet<Language>>;
 
-    fn extract(
-        opts: &SnippetOptions,
-        content: impl AsRef<[u8]>,
-    ) -> Result<Vec<Snippet<Self::Language>>, ExtractorError> {
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            kinds = %opts.kinds(),
+            methods = %opts.methods(),
+            content_len = content.as_bytes().len(),
+        )
+    )]
+    fn extract(opts: &Self::Options, content: &Content) -> Result<Self::Output, Error> {
         let mut parser = init_parser()?;
 
-        let content = content.as_ref();
+        let content = content.as_bytes();
         let Some(tree) = parser.parse(content, None) else {
             warn!("provided content did not parse to a tree");
             return Vec::new().pipe(Ok);
@@ -116,7 +118,7 @@ fn extract<L>(
     meta: SnippetMetadata,
     node: Node<'_>,
     content: &[u8],
-) -> Option<Result<Snippet<L>, ExtractorError>> {
+) -> Option<Result<Snippet<L>, Error>> {
     match target {
         SnippetTarget::Function => extract_function(meta, node, content),
     }
@@ -127,7 +129,7 @@ fn extract_function<L>(
     meta: SnippetMetadata,
     node: Node<'_>,
     content: &[u8],
-) -> Option<Result<Snippet<L>, ExtractorError>> {
+) -> Option<Result<Snippet<L>, Error>> {
     // The raw content here is just extracted for debugging.
     let raw = meta.location().extract_from(content);
     debug!(raw = %raw.display_escaped());
@@ -262,9 +264,9 @@ fn extract_text<'a>(method: SnippetMethod, context: &'a SnippetContext) -> Cow<'
 #[tracing::instrument(skip_all)]
 fn transform<'a>(transform: SnippetTransform, context: &'a SnippetContext) -> Cow<'a, [u8]> {
     match transform {
-        SnippetTransform::Code => normalize_code(context),
-        SnippetTransform::Comment => normalize_comments(context).into(),
-        SnippetTransform::Space => normalize_space(context.content()),
+        SnippetTransform::Code => normalize::code(context),
+        SnippetTransform::Comment => normalize::comments(context).into(),
+        SnippetTransform::Space => normalize::space(context.content()),
     }
 }
 
@@ -279,34 +281,12 @@ fn matches_target(target: SnippetTarget, node: Node<'_>) -> bool {
     }
 }
 
-#[tracing::instrument(skip_all)]
-fn inspect_node(node: &Node<'_>, content: &[u8]) {
-    let location = node.byte_range().pipe(SnippetLocation::from);
-    if node.is_error() {
-        let start = node.start_position();
-        let end = node.end_position();
-        warn!(
-            %location,
-            content = %location.extract_from(content).display_escaped(),
-            kind = %"syntax_error",
-            line_start = start.row,
-            line_end = end.row,
-            col_start = start.column,
-            col_end = end.column,
-        );
-    } else {
-        debug!(
-            %location,
-            content = %location.extract_from(content).display_escaped(),
-            kind = %node.kind(),
-        );
-    }
-}
-
 #[tracing::instrument]
-fn init_parser() -> Result<tree_sitter::Parser, ExtractorError> {
+pub(crate) fn init_parser() -> Result<tree_sitter::Parser, Error> {
     let mut parser = tree_sitter::Parser::new();
-    parser.set_language(tree_sitter_cpp::language())?;
+    parser
+        .set_language(tree_sitter_cpp::language())
+        .map_err(Error::configure)?;
     Ok(parser)
 }
 
@@ -323,6 +303,7 @@ impl<'a> FunctionParts<'a> {
     /// As a performance optimization, if the metadata only asks for the signature,
     /// body nodes are not stored. They are still traversed, in case treesitter
     /// iterates over nodes out of order.
+    #[tracing::instrument(skip_all, fields(meta))]
     fn from(meta: SnippetMetadata, node: Node<'a>, content: &'a [u8]) -> Self {
         let nodes = traverse(node.walk(), Order::Pre).inspect(|node| inspect_node(node, content));
 

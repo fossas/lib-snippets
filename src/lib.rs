@@ -1,13 +1,9 @@
 #![doc = include_str!("../README.md")]
 #![deny(clippy::invalid_regex)]
 
-use std::{
-    borrow::Cow,
-    marker::PhantomData,
-    ops::{Range, RangeInclusive},
-    str::Utf8Error,
-};
+use std::{collections::HashSet, marker::PhantomData, path::Path, str::Utf8Error};
 
+use content::Content;
 use derivative::Derivative;
 use derive_more::{Constructor, Deref, Index};
 pub use fallible_iterator::FallibleIterator;
@@ -15,31 +11,37 @@ use flagset::{flags, FlagSet};
 use getset::{CopyGetters, Getters};
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
+use parser::bytes::Location;
 use strum::{Display, EnumIter};
-use tap::Conv;
+use tap::{Conv, Pipe};
 use thiserror::Error;
+use tree_sitter::Node;
+use tree_sitter_traversal::{traverse, Order};
 use typed_builder::TypedBuilder;
 
+pub mod content;
 pub mod debugging;
+pub(crate) mod ext;
 pub mod language;
+pub mod parser;
 pub mod text;
-mod tree_sitter_consts;
 
 /// Convenience import for all types that
 /// an implementation of [`Extractor`] would likely need.
 ///
 /// Some commonly-named types are renamed to reduce the likelihood of collisions
-/// when imported via this prelude: e.g. [`Error`] becomes [`ExtractorError`].
+/// when imported via this prelude: e.g. [`Error`] becomes `ExtractorError`.
 ///
 /// [`Extractor`]: crate::Extractor
-/// [`Error`]: crate::Error
+/// [`Error`]: enum@crate::Error
 pub mod impl_prelude {
+    pub use super::parser::bytes::Location as SnippetLocation;
     pub use super::{
-        Error as ExtractorError, Extractor as SnippetExtractor, Kind as SnippetKind,
+        Context as SnippetContext, Error, Extractor as SnippetExtractor, Kind as SnippetKind,
         Kinds as SnippetKinds, Language as SnippetLanguage, LanguageError,
-        Location as SnippetLocation, Metadata as SnippetMetadata, Method as SnippetMethod,
-        Options as SnippetOptions, Snippet, Strategy as LanguageStrategy, Target as SnippetTarget,
-        Transform as SnippetTransform, Transforms as SnippetTransforms,
+        Metadata as SnippetMetadata, Method as SnippetMethod, Options as SnippetOptions, Snippet,
+        Strategy as LanguageStrategy, Target as SnippetTarget, Transform as SnippetTransform,
+        Transforms as SnippetTransforms,
     };
 }
 
@@ -52,11 +54,14 @@ pub enum Error {
 
     #[error("read input as utf8")]
     DecodeUTF8(#[from] Utf8Error),
+
+    #[error("read file content")]
+    ReadFile(#[source] std::io::Error),
 }
 
-impl From<tree_sitter::LanguageError> for Error {
-    fn from(err: tree_sitter::LanguageError) -> Self {
-        LanguageError(err).into()
+impl Error {
+    fn configure(err: tree_sitter::LanguageError) -> Self {
+        format!("{err}").pipe(LanguageError).into()
     }
 }
 
@@ -64,31 +69,32 @@ impl From<tree_sitter::LanguageError> for Error {
 // Note: Implementing it this way allows us to keep `tree_sitter` out of the public API.
 //       More details: https://docs.rs/thiserror/latest/thiserror/
 #[derive(Debug, Error)]
-#[error(transparent)]
-pub struct LanguageError(#[from] tree_sitter::LanguageError);
+#[error("language: {0}")]
+pub struct LanguageError(String);
 
-/// An implementation of [`Extractor`] enables snippets to be extracted
+/// An implementation of [`Extractor`] enables output to be extracted
 /// from a given unit of source code (typically a file).
 pub trait Extractor {
-    /// The source language supported by the implementation.
-    type Language: Language;
+    /// The options accepted by the extractor.
+    type Options;
 
-    /// Reads the provided unit of source code for snippets, according to the provided options.
-    ///
-    /// # Reader
-    ///
-    /// The [`Read`] instance provided to `source` may be partially or fully consumed during this process.
-    ///
-    /// If the reader was previously read (partially or fully, by example via [`Extractor::support`]),
-    /// it almost definitely needs to be reset to the initial point before using this method.
-    fn extract(
-        opts: &Options,
-        content: impl AsRef<[u8]>,
-    ) -> Result<Vec<Snippet<Self::Language>>, Error>;
+    /// The output of the extractor.
+    type Output;
+
+    /// Reads the provided unit of source code for output, according to the provided options.
+    fn extract(opts: &Self::Options, content: &Content) -> Result<Self::Output, Error>;
+
+    /// Reads the provided file for output, according to the provided options.
+    fn extract_file(opts: &Self::Options, path: &Path) -> Result<Self::Output, Error> {
+        let content = Content::from_file(path).map_err(Error::ReadFile)?;
+        Self::extract(opts, &content)
+    }
 }
 
-/// Options for extracting snippets.
+/// Default options for extracting snippets.
 /// Options are constructed via the `Options::builder` method.
+///
+/// Note that different extractors can provide unique option types.
 ///
 /// # Best effort
 ///
@@ -131,7 +137,7 @@ pub trait Extractor {
 ///
 /// assert_eq!(options.targets(), Targets::full());
 /// assert_eq!(options.kinds(), Kinds::full());
-/// assert_eq!(options.transforms(), Transforms::full());
+/// assert_eq!(options.methods(), &Methods::full());
 /// ```
 ///
 /// Restricting the kinds of snippet extracted:
@@ -147,31 +153,29 @@ pub trait Extractor {
 /// ```
 /// # use snippets::*;
 /// let options = Options::new(Target::Function, Kinds::full(), Transform::Comment);
-/// assert!(options.transforms().contains(Transform::Comment));
-/// assert!(!options.transforms().contains(Transform::Space));
+/// assert!(options.methods().contains_transform(Transform::Comment));
+/// assert!(!options.methods().contains_transform(Transform::Space));
 /// ```
 ///
 /// Only use [`Method::Raw`]:
 /// ```
 /// # use snippets::*;
-/// let options = Options::new(Target::Function, Kinds::full(), Transforms::none());
-/// assert!(options.transforms().is_empty());
+/// let options = Options::new(Target::Function, Kinds::full(), Methods::raw());
+/// assert!(options.methods().contains(Method::Raw));
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, CopyGetters)]
-#[getset(get_copy = "pub")]
+#[derive(Debug, Clone, PartialEq, Eq, Getters, CopyGetters)]
 pub struct Options {
     /// The target units of source code to extract as snippets.
+    #[getset(get_copy = "pub")]
     targets: Targets,
 
     /// The kinds of snippet to extract.
+    #[getset(get_copy = "pub")]
     kinds: Kinds,
 
     /// The normalizations used to extract this snippet.
-    transforms: Transforms,
-
-    /// Include the `raw` method.
-    /// Recommended for general use; disabling is mainly intended for tests.
-    include_raw: bool,
+    #[getset(get = "pub")]
+    methods: Methods,
 }
 
 impl Options {
@@ -179,38 +183,26 @@ impl Options {
     pub fn new(
         targets: impl Into<Targets>,
         kinds: impl Into<Kinds>,
-        transforms: impl Into<Transforms>,
+        methods: impl Into<Methods>,
     ) -> Self {
         Self {
             targets: targets.conv::<Targets>().default_if_empty(),
             kinds: kinds.conv::<Kinds>().default_if_empty(),
-            transforms: transforms.into(),
-            include_raw: true,
+            methods: methods.into(),
         }
     }
 
-    /// Disable generating [`Method::Raw`] snippets.
-    pub fn disable_raw(self) -> Self {
-        Self {
-            include_raw: false,
-            ..self
-        }
+    /// Ensure that [`Method::Raw`] is disabled in the options.
+    /// Ideally, just don't pass this method in the options in the first place.
+    pub fn disable_raw(mut self) -> Self {
+        self.methods.0.remove(&Method::Raw);
+        self
     }
 
     /// Report the cartesian product of the configured [`Kind`]s of snippets to extract
     /// with configured [`Method`]s to apply.
     pub fn cartesian_product(&self) -> impl Iterator<Item = (Target, Kind, Method)> {
-        let include_raw = self.include_raw;
-        itertools::iproduct!(
-            self.targets.iter(),
-            self.kinds.iter(),
-            Method::iter(self.transforms).filter(move |method| {
-                match method {
-                    Method::Raw => include_raw,
-                    _ => true,
-                }
-            })
-        )
+        itertools::iproduct!(self.targets.iter(), self.kinds.iter(), self.methods.iter())
     }
 }
 
@@ -219,8 +211,7 @@ impl Default for Options {
         Self {
             targets: Targets::full(),
             kinds: Kinds::full(),
-            transforms: Transforms::full(),
-            include_raw: true,
+            methods: Methods::full(),
         }
     }
 }
@@ -464,177 +455,6 @@ impl std::fmt::Display for Metadata {
     }
 }
 
-/// The location in the unit of source code from which the snippet was extracted.
-///
-/// After opening the file (so a hypothetical reader is at byte offset `0`),
-/// the reader then skips a number of bytes equal to `byte_offset`,
-/// then reads a number of bytes equal to `byte_len`.
-/// The bytes that were read compose the entire snippet.
-///
-/// For example, given the file:
-/// ```not_rust
-/// #include <stdio.h>
-///
-/// int main() {
-///   printf("hello world\n");
-///   return 0;
-/// }
-/// ```
-///
-/// In the representation the computer sees, it looks like this (using `⏎` to represent a newline):
-/// ```not_rust
-/// #include <stdio.h>⏎⏎int main() {⏎  printf("hello world\n");⏎  return 0;⏎}⏎
-/// ^^^^                ^        ^
-/// 0123...             20 <-9-> 29
-/// ```
-///
-/// The [`Location`] below represents the `int main()` snippet in that example:
-/// ```
-/// # // ⏎ is a multi-byte symbol, so use an empty space for demonstration instead.
-/// # let example = "#include <stdio.h>  int main() {}";
-/// # use snippets::*;
-/// let location = Location::builder().byte_offset(20).byte_len(10).build();
-///
-/// let range = location.as_range();
-/// let snippet = &example.as_bytes()[range];
-///
-/// let got = std::str::from_utf8(snippet)?;
-/// assert_eq!(got, "int main()");
-/// # Ok::<(), std::str::Utf8Error>(())
-/// ```
-//
-// Note: we use a `TypedBuilder` instead of a `Constructor` here because this way we can accept
-// a standard `usize` for each argument while still making it very clear in-code
-// which argument is which.
-//
-// Basically, the intent is to straddle the line between newtype convenience and newtype safety.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, CopyGetters, TypedBuilder)]
-#[getset(get_copy = "pub")]
-pub struct Location {
-    /// The byte offset at which the snippet began.
-    #[builder(setter(transform = |input: usize| ByteOffset(input)))]
-    byte_offset: ByteOffset,
-
-    /// The number of bytes to read for the snippet from the file.
-    #[builder(setter(transform = |input: usize| ByteLen(input)))]
-    byte_len: ByteLen,
-}
-
-impl std::fmt::Display for Location {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}..={}", self.start_byte(), self.end_byte())
-    }
-}
-
-impl Location {
-    /// Read a [`Location`] as a range, intended to be used to index a buffer of bytes.
-    pub fn as_range(&self) -> std::ops::Range<usize> {
-        let start = self.byte_offset.0;
-        let len = self.byte_len.0;
-        let end = start + len;
-        start..end
-    }
-
-    /// The index of the first byte indicated for the provided location.
-    pub fn start_byte(&self) -> usize {
-        self.as_range().start
-    }
-
-    /// The index of the last byte indicated for the provided location.
-    pub fn end_byte(&self) -> usize {
-        let end = self.as_range().end;
-        if end == 0 {
-            0
-        } else {
-            end - 1 // as_range is not inclusive, so the last byte _to be read_ is less one.
-        }
-    }
-
-    /// Extract the bytes indicated by a [`Location`] from a buffer.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// # use snippets::*;
-    /// let example = "#include <stdio.h>  int main() {}";
-    /// let location = Location::builder().byte_offset(20).byte_len(10).build();
-    ///
-    /// let got = location.extract_from(example.as_bytes());
-    /// assert_eq!(got, b"int main()");
-    /// ```
-    pub fn extract_from<'a>(&self, buf: &'a [u8]) -> &'a [u8] {
-        &buf[self.as_range()]
-    }
-
-    /// Extract the bytes indicated by a [`Location`] from a buffer,
-    /// into a lossily converted [`String`].
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// # use snippets::*;
-    /// let example = "#include <stdio.h>  int main() {}";
-    /// let location = Location::builder().byte_offset(20).byte_len(10).build();
-    ///
-    /// let got = location.extract_from_lossy(example.as_bytes());
-    /// assert_eq!(got, "int main()");
-    /// ```
-    pub fn extract_from_lossy<'a>(&self, buf: &'a [u8]) -> Cow<'a, str> {
-        let bytes = self.extract_from(buf);
-        String::from_utf8_lossy(bytes)
-    }
-}
-
-impl From<Range<usize>> for Location {
-    fn from(value: Range<usize>) -> Self {
-        let start = value.start;
-        let end = value.end;
-        Self {
-            byte_offset: ByteOffset(start),
-            byte_len: ByteLen(end - start),
-        }
-    }
-}
-
-impl From<RangeInclusive<usize>> for Location {
-    fn from(value: RangeInclusive<usize>) -> Self {
-        let start = *value.start();
-        let end = *value.end() + 1;
-        Self {
-            byte_offset: ByteOffset(start),
-            byte_len: ByteLen(end - start),
-        }
-    }
-}
-
-/// The byte offset at which the snippet began.
-///
-/// Zero-based, meaning that if the snippet begins on the first byte of the file,
-/// this offset is `0`.
-///
-/// Think of the offset as
-/// "the number of bytes to skip from the start of the file to when this snippet begins".
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, derive_more::Display)]
-pub struct ByteOffset(usize);
-
-impl ByteOffset {
-    /// View the offset as a usize.
-    pub fn as_usize(self) -> usize {
-        self.0
-    }
-}
-
-/// The number of bytes to read for the snippet from the file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, derive_more::Display)]
-pub struct ByteLen(usize);
-
-impl ByteLen {
-    /// View the length as a usize.
-    pub fn as_usize(self) -> usize {
-        self.0
-    }
-}
-
 flags! {
     /// The kind of item this snippet represents.
     ///
@@ -796,6 +616,99 @@ impl std::fmt::Display for Kinds {
     }
 }
 
+/// Methods used to extract snippets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Methods(HashSet<Method>);
+
+impl Methods {
+    /// Convenience constructor for all methods.
+    pub fn full() -> Self {
+        Transforms::full().pipe(Self::raw_and)
+    }
+
+    /// Construct a set of methods which only contains the `Raw` method.
+    pub fn raw() -> Self {
+        HashSet::from_iter([Method::Raw]).pipe(Self)
+    }
+
+    /// Construct a set of methods including raw and the provided transforms.
+    pub fn raw_and(transforms: Transforms) -> Self {
+        Method::iter(transforms).collect::<HashSet<_>>().pipe(Self)
+    }
+
+    /// Construct an empty set of methods.
+    pub fn empty() -> Self {
+        HashSet::new().pipe(Self)
+    }
+
+    /// Add a method to the set.
+    pub fn insert(&mut self, method: Method) {
+        self.0.insert(method);
+    }
+
+    /// Iterate over methods in the set.
+    pub fn iter(&self) -> impl Iterator<Item = Method> + Clone {
+        self.0.iter().copied().collect_vec().into_iter()
+    }
+
+    /// Report whether a method is contained in the set.
+    pub fn contains(&self, test: Method) -> bool {
+        self.0.contains(&test)
+    }
+
+    /// Report whether a transform is contained in the set.
+    pub fn contains_transform(&self, test: Transform) -> bool {
+        for method in &self.0 {
+            let Method::Normalized(transform) = method else {
+                continue;
+            };
+            if *transform == test {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+impl From<Option<Transforms>> for Methods {
+    fn from(value: Option<Transforms>) -> Self {
+        match value {
+            Some(transforms) => Self::from(transforms),
+            None => Self::raw(),
+        }
+    }
+}
+
+impl From<Option<Transform>> for Methods {
+    fn from(value: Option<Transform>) -> Self {
+        Transforms::from(value).pipe(Self::from)
+    }
+}
+
+impl From<Transform> for Methods {
+    fn from(value: Transform) -> Self {
+        Transforms::from(value).pipe(Self::from)
+    }
+}
+
+impl From<Transforms> for Methods {
+    fn from(value: Transforms) -> Self {
+        Self::raw_and(value)
+    }
+}
+
+impl std::fmt::Display for Methods {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let methods = self
+            .iter()
+            .sorted_unstable()
+            .map(|t| t.to_string())
+            .collect_vec()
+            .join(",");
+        write!(f, "{methods}")
+    }
+}
+
 /// The method used to extract this snippet.
 ///
 /// # Specificity order
@@ -813,7 +726,7 @@ impl std::fmt::Display for Kinds {
 /// # let arbitrary = Transform::Space;
 /// assert!(Method::Raw > Method::Normalized(arbitrary));
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub enum Method {
     /// Generated from the text with the specified normalizations applied.
@@ -1218,6 +1131,69 @@ trait DefaultIfEmpty: Default {
     }
 }
 
+/// This structure represents a view into a larger piece of parsed text.
+/// For snippet scanning, we generally look at just parts of a larger piece of text for each snippet.
+#[derive(Debug, PartialEq, Getters, CopyGetters)]
+pub struct Context<'a> {
+    /// The location (in `content`) of this snippet.
+    #[getset(get_copy = "pub")]
+    location: Location,
+
+    /// Parsed nodes representing the snippet.
+    #[getset(get = "pub")]
+    nodes: Vec<Node<'a>>,
+
+    /// The full text in which this snippet resides.
+    content: &'a [u8],
+}
+
+impl<'a> Context<'a> {
+    /// Make a new instance from a parent node and its location within the original parsed text.
+    ///
+    /// Ensure that the content provided is the same as the content used to extract the parent node;
+    /// byte offsets must line up for operations on this type to make sense.
+    pub fn new(parent: Node<'a>, location: Location, content: &'a [u8]) -> Self {
+        Self::from_nodes(traverse(parent.walk(), Order::Pre), location, content)
+    }
+
+    /// Make a new instance from a set of nodes and their location within the original parsed text.
+    ///
+    /// Ensure that the content provided is the same as the content used to extract the nodes;
+    /// byte offsets must line up for operations on this type to make sense.
+    pub fn from_nodes(
+        nodes: impl IntoIterator<Item = Node<'a>>,
+        location: Location,
+        content: &'a [u8],
+    ) -> Self {
+        Context {
+            nodes: nodes.into_iter().collect(),
+            location,
+            content,
+        }
+    }
+
+    /// Extract the part of the content indicated by the location.
+    pub fn content(&self) -> &[u8] {
+        self.location.extract_from(self.content)
+    }
+
+    /// Get content from the snippet which is not in ranges covered by the provided nodes.
+    pub fn content_around(&self, nodes: impl Iterator<Item = &'a Node<'a>>) -> Vec<u8> {
+        let mut slices = Vec::new();
+        let mut start_byte = self.location.start_byte();
+
+        for node in nodes {
+            let node_start_byte = node.start_byte();
+            slices.push(&self.content[start_byte..node_start_byte]);
+            start_byte = node.end_byte();
+        }
+
+        // `Location::end_byte` is inclusive.
+        slices.push(&self.content[start_byte..=self.location.end_byte()]);
+        slices.concat()
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -1279,10 +1255,7 @@ mod tests {
 
     #[test]
     fn location_round_trip() {
-        let location = Location {
-            byte_offset: ByteOffset(20),
-            byte_len: ByteLen(10),
-        };
+        let location = Location::builder().byte_offset(20).byte_len(10).build();
         let inclusive_range = 20..=29;
         let range = 20..30;
 
@@ -1293,10 +1266,7 @@ mod tests {
 
     #[test]
     fn location_bytes_round_trip() {
-        let location = Location {
-            byte_offset: ByteOffset(10),
-            byte_len: ByteLen(10),
-        };
+        let location = Location::builder().byte_offset(10).byte_len(10).build();
 
         let input = "0123456789helloworld_abcdefghijk";
         assert_eq!(location.extract_from(input.as_bytes()), b"helloworld");
@@ -1315,10 +1285,7 @@ mod tests {
     #[test]
     fn location_extract() {
         let input = "0123456789helloworld0123456789";
-        let location = Location {
-            byte_offset: ByteOffset(10),
-            byte_len: ByteLen(10),
-        };
+        let location = Location::builder().byte_offset(10).byte_len(10).build();
 
         assert_eq!(location.extract_from(input.as_bytes()), b"helloworld");
         assert_eq!(location.start_byte(), 10);
@@ -1328,10 +1295,7 @@ mod tests {
     #[test]
     fn location_extract_end() {
         let input = "0123456789helloworld";
-        let location = Location {
-            byte_offset: ByteOffset(10),
-            byte_len: ByteLen(10),
-        };
+        let location = Location::builder().byte_offset(10).byte_len(10).build();
 
         assert_eq!(location.extract_from(input.as_bytes()), b"helloworld");
     }

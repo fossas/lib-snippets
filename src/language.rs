@@ -9,9 +9,5 @@ pub mod c99_tc3;
 #[cfg(feature = "lang-cpp-98")]
 pub mod cpp_98;
 
-pub use normalize_code::*;
-pub use normalize_comments::*;
-
-mod normalize_code;
-mod normalize_comments;
-mod snippet_context;
+#[cfg(feature = "lang-java-11")]
+pub mod java_11;

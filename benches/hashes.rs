@@ -1,6 +1,8 @@
+use std::ops::Deref;
+
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use sha2::{Digest, Sha256};
-use snippets::text::ConvertCRLFToLF;
+use snippets::parser::normalize;
 
 const INPUT: &[u8] = b"Iste nam laboriosam \r\n voluptatem \n distinctio.";
 
@@ -39,7 +41,7 @@ fn hash_vec() {
 
 fn hash_transform_iter() {
     let mut hasher = Sha256::new();
-    for c in INPUT.iter().copied().convert_crlf_lf() {
+    for &c in normalize::crlf(INPUT).deref() {
         hasher.update([c]);
     }
     let digest = hasher.finalize().as_slice().to_vec();
@@ -49,7 +51,7 @@ fn hash_transform_iter() {
 
 fn hash_transform_vec() {
     let mut hasher = Sha256::new();
-    let input = INPUT.iter().copied().convert_crlf_lf().collect::<Vec<_>>();
+    let input = normalize::crlf(INPUT);
     hasher.update(&input);
     let digest = hasher.finalize().as_slice().to_vec();
 
